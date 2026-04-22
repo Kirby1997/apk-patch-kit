@@ -1,0 +1,11 @@
+[versions]
+kotlin = "2.3.10"
+revanced-patcher = "22.0.1"
+smali = "3.0.9"
+
+[libraries]
+revanced-patcher = { module = "app.revanced:patcher-jvm", version.ref = "revanced-patcher" }
+smali = { module = "com.android.tools.smali:smali", version.ref = "smali" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
