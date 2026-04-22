@@ -343,9 +343,11 @@ if not defined APP_VERSION set "APP_VERSION=TODO-fill-in"
     echo - **Target version:** `!APP_VERSION!`
     echo - **Patches module:** `:patches:!APP_NAME!`
     echo.
+    echo ^> Scaffolded by `add-app.sh` / `add-app.bat`, which pulled the APK ^(and any splits^) from a connected device via `adb pull`. Re-running the script on a different device with the same package produces the same `apps/^<name^>/` layout.
+    echo.
     echo ## APKs
     echo.
-    echo The `apks/` directory is git-ignored - APKs are the vendor's IP and cannot be redistributed here. Obtain them yourself from a reputable mirror and place them in `apks/`.
+    echo The `apks/` directory is git-ignored - APKs are the vendor's IP and cannot be redistributed here. Obtain them yourself from a reputable mirror ^(or re-run `add-app.sh` against a device that has the app installed^) and place them in `apks/`.
     echo.
     echo Expected files and checksums ^(SHA-256^):
     echo.

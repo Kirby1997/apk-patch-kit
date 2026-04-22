@@ -24,10 +24,9 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "claude-apk-patches"
+rootProject.name = "apk-patch-kit"
 
 // Each app is its own Gradle subproject under patches/<app>/ producing its own jar.
-// Add new apps here as they are written.
-include(":patches:hidratenow")
-include(":patches:meetup")
+// Add new apps here as they are written (add-app.sh appends automatically).
 include(":patches:hidratespark")
+include(":patches:meetup")
