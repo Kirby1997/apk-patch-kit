@@ -25,8 +25,10 @@ apps/<app>/               # One directory per app
 
 Apps currently supported:
 
-- [`hidratespark`](apps/hidratespark/README.md) — bypass login, disable license check, unlock premium
-- [`meetup`](apps/meetup/README.md) — scaffolded, no patches yet
+- [`hidratespark`](apps/hidratespark/README.md) (`hidratenow.com.hidrate.hidrateandroid` v4.6.9) — disable Google Play license check, unlock premium
+- [`meetup`](apps/meetup/README.md) (`com.meetup` v2026.04.10.2881) — disable intro/profile/StepUp/MemberSub paywalls, hide Meetup+ trial banner, hide attendees paywall panels, auto-reject OneTrust cookie banner, unblur gated profile content, inject your own Maps API key
+- [`tinder`](apps/tinder/README.md) (`com.tinder` v17.15.0) — disable paywall flow + dynamic paywall sheet, dismiss every dialog upsell (Boost, MyLikes, Platinum Likes, Primetime, Secret Admirer, Headless Purchase), suppress ads-bouncer rewarded-video and standalone rewarded-video modals
+- [`strava`](apps/strava/README.md) (`com.strava` v460.9) — **consumes upstream `patches.rvp` directly**, no local patches subproject. Drop a `patches-<ver>.rvp` at the repo root and run `./patch-apks.sh --app strava --patches patches-<ver>.rvp`.
 
 ## Requirements
 
@@ -82,7 +84,9 @@ Every patch should:
 - Declare `compatibleWith("<package>"("<version>"))` — without this the patch silently no-ops against other versions
 - Anchor fingerprints on fully-qualified class type + method name + signature rather than opcode patterns (types survive obfuscation better)
 
-See `patches/hidratespark/` for three working examples (return-true injection, method replacement, license-check bypass). Detailed conventions and a working template are in [`CLAUDE.md`](CLAUDE.md).
+See `patches/hidratespark/`, `patches/meetup/`, and `patches/tinder/` for working examples — return-true injection, `return-void` chokepoints on activity `onCreate`, DialogFragment dismiss-and-return-null, Compose-overload no-ops, and a resource patch (`InjectMapsKeyPatch`) that rewrites a manifest `meta-data` value. Detailed conventions and a working template are in [`CLAUDE.md`](CLAUDE.md).
+
+> **High-locals gotcha:** `addInstructions` injects raw smali into the existing method, inheriting its `.locals` count. If `.locals + parameter_count > 16`, references to `p0`/`p1`/etc may land above v15 and 4-bit-register instructions (`const/4`, `invoke-virtual {...}` non-range form) will fail to assemble with `Invalid register: vNN`. Use `invoke-virtual/range {p0 .. p0}` and stash constants in a low local like `v0`. See `patches/tinder/.../DisableAdsBouncerPaywallPatch.kt` for the pattern.
 
 ## APKs
 

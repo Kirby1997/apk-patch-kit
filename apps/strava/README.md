@@ -24,14 +24,24 @@ Expected files and checksums (SHA-256):
 
 ## Applying patches
 
+> Why no `:patches:strava` subproject? The upstream Strava patches depend on a full Android/DEX extension toolchain (`extensions/strava/` library + stubs + a shared `Utils` module) that isn't ported into this repo. Consuming the prebuilt `.rvp` is the path of least resistance — it carries every Strava patch the upstream maintains, already wired up to its extension code.
+
 From the repo root:
 
+```bash
+# One-time: fetch the upstream bundle (check the current version at
+# https://api.revanced.app/v5/patches/version).
+curl -L -o patches.rvp https://api.revanced.app/v5/patches.rvp
+
+./patch-apks.sh --app strava --patches patches.rvp
+```
+
 ```cmd
-REM One-time: fetch the upstream bundle (use curl.exe, not curl, because
-REM PowerShell aliases `curl` to Invoke-WebRequest which rejects curl flags).
+REM Use curl.exe (not curl) because PowerShell aliases `curl` to
+REM Invoke-WebRequest, which rejects curl flags.
 curl.exe -L -o patches.rvp https://api.revanced.app/v5/patches.rvp
 
 patch-apks.bat --app strava --patches patches.rvp
 ```
 
-The interactive patch selector lists every patch in the bundle (hundreds). Type `n` to deselect all, then pick the ones for this app by number.
+The interactive patch selector lists every patch in the bundle (hundreds). Type `n` to deselect all, then pick the Strava ones by number — the CLI only applies patches whose `compatibleWith` matches `com.strava` regardless, so leaving unrelated ones selected is harmless but slow.
