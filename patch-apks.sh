@@ -42,30 +42,102 @@ APK_FILE=""
 PATCHES_JAR=""
 REVANCED_CLI=""
 NO_UI=false
+SIGN_ONLY=false
+MAPS_KEY="${MAPS_API_KEY:-}"
+PACKAGE=""
+INCLUDE_UNIVERSAL=false
+NO_FILTER=false
+INSTALL=false
+REINSTALL=false
+ADB_OVERRIDE=""
 
 # ── Parse CLI arguments ─────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --app)       APP="$2"; shift 2 ;;
-        --apk)       APK_FILE="$2"; shift 2 ;;
-        --patches)   PATCHES_JAR="$2"; shift 2 ;;
-        --cli)       REVANCED_CLI="$2"; shift 2 ;;
-        --no-ui)     NO_UI=true; shift ;;
+        --app)               APP="$2"; shift 2 ;;
+        --apk)               APK_FILE="$2"; shift 2 ;;
+        --patches)           PATCHES_JAR="$2"; shift 2 ;;
+        --cli)               REVANCED_CLI="$2"; shift 2 ;;
+        --no-ui)             NO_UI=true; shift ;;
+        --sign-only)         SIGN_ONLY=true; shift ;;
+        --maps-key)          MAPS_KEY="$2"; shift 2 ;;
+        --package)           PACKAGE="$2"; shift 2 ;;
+        --include-universal) INCLUDE_UNIVERSAL=true; shift ;;
+        --no-filter)         NO_FILTER=true; shift ;;
+        --install)           INSTALL=true; shift ;;
+        --reinstall)         INSTALL=true; REINSTALL=true; shift ;;
+        --adb)               ADB_OVERRIDE="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: ./patch-apks.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --app <name>       App subproject name (e.g. hidratenow). Auto-picks APK + patches jar"
-            echo "  --apk <file>       APK or APKS file to patch (overrides --app apk lookup)"
-            echo "  --patches <jar>    Patches JAR/RVP file (overrides --app jar lookup)"
-            echo "  --cli <jar>        Path to revanced-cli jar"
-            echo "  --no-ui            Skip interactive UI, apply all patches"
-            echo "  -h, --help         Show this help"
+            echo "  --app <name>         App subproject name (e.g. hidratenow). Auto-picks APK + patches jar"
+            echo "  --apk <file>         APK or APKS file to patch (overrides --app apk lookup)"
+            echo "  --patches <jar>      Patches JAR/RVP file (overrides --app jar lookup)"
+            echo "  --cli <jar>          Path to revanced-cli jar"
+            echo "  --no-ui              Skip interactive UI, apply all patches"
+            echo "  --sign-only          Skip patching entirely, just re-sign and repack"
+            echo "  --maps-key <key>     Google Maps API key to inject via the 'Inject Google Maps API key' patch"
+            echo ""
+            echo "Install:"
+            echo "  --install            adb-install the patched APK after building (in-place; keeps app data."
+            echo "                       Bails with a hint if the device's installed copy was signed differently)."
+            echo "  --reinstall          As --install, but uninstall first (wipes app data — only needed when"
+            echo "                       transitioning from the Play Store build to the patched build)."
+            echo "  --adb <path>         Override adb binary location (default: WSL→adb.exe, else adb on PATH)."
+            echo ""
+            echo "Patch filtering (applies when using a large upstream bundle like patches.rvp):"
+            echo "  --package <pkg>      Explicit package name to filter patches by (e.g. com.strava)."
+            echo "                       When --app is used, the package is auto-read from apps/<app>/README.md."
+            echo "  --include-universal  Also show 'universal' patches (compatible with any app) in the selector."
+            echo "                       Off by default to keep the selector small."
+            echo "  --no-filter          Disable package filtering entirely — show every patch in the bundle."
+            echo ""
+            echo "  -h, --help           Show this help"
             exit 0
             ;;
         *) err "Unknown argument: $1. Use --help for usage." ;;
     esac
 done
+
+# ── adb locator ─────────────────────────────────────────────────────
+# Mirrors add-app.sh: on WSL we must call the Windows adb.exe (USB devices
+# are invisible to the Linux adb without usbipd), so prefer adb.exe when
+# we can find it, fall back to adb on PATH otherwise.
+locate_adb() {
+    [[ -n "$ADB_OVERRIDE" ]] && { echo "$ADB_OVERRIDE"; return 0; }
+
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+        if command -v adb.exe >/dev/null 2>&1; then
+            command -v adb.exe
+            return 0
+        fi
+        local candidate
+        for base in /mnt/c/Users/*/AppData/Local/Android/Sdk/platform-tools \
+                    "/mnt/c/Program Files/Android/Sdk/platform-tools" \
+                    "/mnt/c/Program Files (x86)/Android/Sdk/platform-tools" \
+                    /mnt/c/ProgramData/chocolatey/bin; do
+            candidate="$base/adb.exe"
+            [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
+        done
+    fi
+
+    if command -v adb >/dev/null 2>&1; then
+        command -v adb
+        return 0
+    fi
+    return 1
+}
+
+# adb.exe is a Windows binary; pass Windows-style paths to its install args.
+# On native Linux this is a no-op.
+adb_local_path() {
+    if [[ "${ADB:-}" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+        wslpath -w "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
 
 # ── App picker ──────────────────────────────────────────────────────
 pick_app() {
@@ -109,9 +181,34 @@ pick_file() {
 
     for pattern in "${patterns[@]}"; do
         while IFS= read -r -d '' f; do
+            # Split APKs from Android App Bundles can't be patched on their own —
+            # they carry no dex code, only per-config resources. Hide them from
+            # the picker so users don't accidentally pick one.
+            [[ "$(basename "$f")" == split_*.apk ]] && continue
             files+=("$f")
         done < <(find "$search_root" -maxdepth 4 -name "$pattern" -print0 2>/dev/null | sort -z)
     done
+
+    # Dedupe — overlapping patterns (e.g. revanced-cli-*-all.jar and
+    # revanced-cli*.jar) can match the same file twice. Order-preserving.
+    if [[ ${#files[@]} -gt 1 ]]; then
+        mapfile -t files < <(printf '%s\n' "${files[@]}" | awk '!seen[$0]++')
+    fi
+
+    # When a .apks bundle is in the mix, drop standalone .apk files — the
+    # bundle already contains base + every split, so listing them separately
+    # is redundant and just invites a wrong pick.
+    local has_apks=false
+    for f in "${files[@]}"; do
+        [[ "$f" == *.apks ]] && { has_apks=true; break; }
+    done
+    if $has_apks; then
+        local filtered=()
+        for f in "${files[@]}"; do
+            [[ "$f" == *.apks ]] && filtered+=("$f")
+        done
+        files=("${filtered[@]}")
+    fi
 
     if [[ ${#files[@]} -eq 0 ]]; then
         echo ""
@@ -152,15 +249,31 @@ pick_file() {
 }
 
 # ── Parse patch names from the patches jar ─────────────────────────
+# Accepts optional --filter-package-name / --universal-patches=false to
+# let the caller scope the list to an app's compatible patches. See the
+# "Discover + select patches" block below for how the flags are chosen.
 get_patch_names() {
     local cli_jar="$1"
     local patches_jar="$2"
+    shift 2
+    # Remaining args: extra flags forwarded to list-patches.
 
     # Use list-patches: patcher 22+ crashes in ResourcesDecoder before any
     # patches load if the "APK" input isn't really an APK, so the old
     # dry-run trick no longer yields a patch list.
-    java -jar "$cli_jar" list-patches -p "$patches_jar" -b 2>/dev/null \
+    java -jar "$cli_jar" list-patches -p "$patches_jar" -b "$@" 2>/dev/null \
         | sed -n 's/^Name: //p'
+}
+
+# Read the declared package name for an app from its README front-matter.
+# The add-app scaffolder writes `- **Package:** `com.foo.bar`` as the first
+# bullet; this greps that line back out.
+read_app_package() {
+    local app="$1"
+    local readme="$SCRIPT_DIR/apps/$app/README.md"
+    [[ -f "$readme" ]] || return 1
+    # Matches: - **Package:** `com.foo.bar`
+    sed -n 's/^- \*\*Package:\*\* `\([^`]*\)`.*/\1/p' "$readme" | head -1
 }
 
 # ── Interactive patch selector ──────────────────────────────────────
@@ -188,7 +301,7 @@ patch_selector() {
 
         local enabled_count=0
         for state in "${_states[@]}"; do
-            [[ "$state" == "on" ]] && ((enabled_count++))
+            [[ "$state" == "on" ]] && enabled_count=$((enabled_count + 1))
         done
 
         echo ""
@@ -235,12 +348,16 @@ echo "  ║         ReVanced APK Patcher                 ║"
 echo "  ╚══════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# ── Find revanced-cli ───────────────────────────────────────────────
-if [[ -z "$REVANCED_CLI" ]]; then
-    REVANCED_CLI=$(pick_file "Select revanced-cli JAR:" "$SCRIPT_DIR" "revanced-cli-*-all.jar" "revanced-cli*.jar")
+# ── Find revanced-cli (skipped in --sign-only) ─────────────────────
+if ! $SIGN_ONLY; then
+    if [[ -z "$REVANCED_CLI" ]]; then
+        REVANCED_CLI=$(pick_file "Select revanced-cli JAR:" "$SCRIPT_DIR" "revanced-cli-*-all.jar" "revanced-cli*.jar")
+    fi
+    [[ -n "$REVANCED_CLI" && -f "$REVANCED_CLI" ]] || err "revanced-cli jar not found. Use --cli <path> or place one in the repo root."
+    log "CLI: $(basename "$REVANCED_CLI")"
+else
+    log "Sign-only mode: skipping patcher (will re-sign the original APK unchanged)"
 fi
-[[ -n "$REVANCED_CLI" && -f "$REVANCED_CLI" ]] || err "revanced-cli jar not found. Use --cli <path> or place one in the repo root."
-log "CLI: $(basename "$REVANCED_CLI")"
 
 # ── Resolve app ─────────────────────────────────────────────────────
 if [[ -z "$APP" && -z "$APK_FILE" && -z "$PATCHES_JAR" ]]; then
@@ -251,27 +368,29 @@ if [[ -n "$APP" ]]; then
     log "App: $APP"
 fi
 
-# ── Find patches jar ───────────────────────────────────────────────
-if [[ -z "$PATCHES_JAR" ]]; then
-    if [[ -n "$APP" ]]; then
-        PATCHES_PROJECT="$SCRIPT_DIR/patches/$APP"
-        if [[ -d "$PATCHES_PROJECT" ]]; then
-            echo ""
-            read -rp "  Build :patches:$APP from source? (Y/n): " build_choice
-            if [[ "${build_choice:-Y}" =~ ^[Yy]$ ]]; then
-                log "Building :patches:$APP ..."
-                (cd "$SCRIPT_DIR" && ./gradlew ":patches:$APP:build" -q 2>&1 | tail -5)
+# ── Find patches jar (skipped in --sign-only) ──────────────────────
+if ! $SIGN_ONLY; then
+    if [[ -z "$PATCHES_JAR" ]]; then
+        if [[ -n "$APP" ]]; then
+            PATCHES_PROJECT="$SCRIPT_DIR/patches/$APP"
+            if [[ -d "$PATCHES_PROJECT" ]]; then
+                echo ""
+                read -rp "  Build :patches:$APP from source? (Y/n): " build_choice
+                if [[ "${build_choice:-Y}" =~ ^[Yy]$ ]]; then
+                    log "Building :patches:$APP ..."
+                    (cd "$SCRIPT_DIR" && ./gradlew ":patches:$APP:build" -q 2>&1 | tail -5)
+                fi
+                PATCHES_JAR=$(find "$PATCHES_PROJECT/build/libs" -maxdepth 1 -name '*.jar' 2>/dev/null | head -1)
             fi
-            PATCHES_JAR=$(find "$PATCHES_PROJECT/build/libs" -maxdepth 1 -name '*.jar' 2>/dev/null | head -1)
+        fi
+
+        if [[ -z "$PATCHES_JAR" || ! -f "$PATCHES_JAR" ]]; then
+            PATCHES_JAR=$(pick_file "Select patches JAR/RVP:" "$SCRIPT_DIR" "*patches*.jar" "*.rvp")
         fi
     fi
-
-    if [[ -z "$PATCHES_JAR" || ! -f "$PATCHES_JAR" ]]; then
-        PATCHES_JAR=$(pick_file "Select patches JAR/RVP:" "$SCRIPT_DIR" "*patches*.jar" "*.rvp")
-    fi
+    [[ -n "$PATCHES_JAR" && -f "$PATCHES_JAR" ]] || err "Patches file not found."
+    log "Patches: $(basename "$PATCHES_JAR")"
 fi
-[[ -n "$PATCHES_JAR" && -f "$PATCHES_JAR" ]] || err "Patches file not found."
-log "Patches: $(basename "$PATCHES_JAR")"
 
 # ── Find APK ───────────────────────────────────────────────────────
 if [[ -z "$APK_FILE" ]]; then
@@ -292,47 +411,87 @@ if [[ "$APK_FILE" == *.apks ]]; then
     command -v apksigner >/dev/null 2>&1 || err "apksigner required for .apks bundles. Install with: sudo apt install apksigner"
 fi
 
-# ── Discover available patches ──────────────────────────────────────
-log "Discovering patches..."
+# ── Discover + select patches (skipped in --sign-only) ─────────────
 declare -a PATCH_NAMES=()
 declare -a PATCH_STATES=()
+CLI_PATCH_ARGS=()
 
-while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    PATCH_NAMES+=("$name")
-    PATCH_STATES+=("on")
-done < <(get_patch_names "$REVANCED_CLI" "$PATCHES_JAR")
+if ! $SIGN_ONLY; then
+    # Resolve the package name for filtering. Precedence:
+    #   1. --package <pkg> (explicit override)
+    #   2. `apps/<app>/README.md` "Package:" line, when --app is used
+    # If neither is available, we don't filter — every patch in the bundle shows
+    # up as before (that's the correct behaviour for ad-hoc `--apk` runs).
+    if [[ -z "$PACKAGE" && -n "$APP" ]]; then
+        PACKAGE=$(read_app_package "$APP" || true)
+        [[ -n "$PACKAGE" ]] && log "Package (from apps/$APP/README.md): $PACKAGE"
+    fi
 
-if [[ ${#PATCH_NAMES[@]} -eq 0 ]]; then
-    err "No patches found in $(basename "$PATCHES_JAR")"
-fi
+    LIST_FLAGS=()
+    if ! $NO_FILTER && [[ -n "$PACKAGE" ]]; then
+        LIST_FLAGS+=("--filter-package-name=$PACKAGE")
+        if ! $INCLUDE_UNIVERSAL; then
+            LIST_FLAGS+=("--universal-patches=false")
+        fi
+    fi
 
-log "Found ${#PATCH_NAMES[@]} patch(es)"
+    log "Discovering patches..."
 
-# ── Patch selector UI ──────────────────────────────────────────────
-if ! $NO_UI; then
-    patch_selector PATCH_NAMES PATCH_STATES
-fi
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        PATCH_NAMES+=("$name")
+        PATCH_STATES+=("on")
+    done < <(get_patch_names "$REVANCED_CLI" "$PATCHES_JAR" "${LIST_FLAGS[@]}")
 
-# ── Print selection summary ─────────────────────────────────────────
-echo ""
-log "Patch configuration:"
-for i in "${!PATCH_NAMES[@]}"; do
-    if [[ "${PATCH_STATES[$i]}" == "on" ]]; then
-        echo -e "    ${GREEN}[x]${NC} ${PATCH_NAMES[$i]}"
+    if [[ ${#PATCH_NAMES[@]} -eq 0 ]]; then
+        err "No patches found in $(basename "$PATCHES_JAR")"
+    fi
+
+    # Count hidden universals so users know the flag exists. We only compute
+    # this when filtering is active; otherwise it's noise.
+    if ! $NO_FILTER && [[ -n "$PACKAGE" ]] && ! $INCLUDE_UNIVERSAL; then
+        UNIVERSAL_COUNT=$(get_patch_names "$REVANCED_CLI" "$PATCHES_JAR" \
+            "--filter-package-name=__nonexistent__" 2>/dev/null | grep -c . || true)
+        log "Found ${#PATCH_NAMES[@]} patch(es) for $PACKAGE (${UNIVERSAL_COUNT} universal patches hidden — pass --include-universal to see them)"
+    elif ! $NO_FILTER && [[ -n "$PACKAGE" ]]; then
+        log "Found ${#PATCH_NAMES[@]} patch(es) for $PACKAGE (including universal)"
     else
-        echo -e "    ${DIM}[ ] ${PATCH_NAMES[$i]}${NC}"
+        log "Found ${#PATCH_NAMES[@]} patch(es) (unfiltered — pass --package <pkg> or use --app to scope)"
     fi
-done
-echo ""
 
-# ── Build revanced-cli args ────────────────────────────────────────
-CLI_PATCH_ARGS=("--exclusive")
-for i in "${!PATCH_NAMES[@]}"; do
-    if [[ "${PATCH_STATES[$i]}" == "on" ]]; then
-        CLI_PATCH_ARGS+=("-e" "${PATCH_NAMES[$i]}")
+    if ! $NO_UI; then
+        patch_selector PATCH_NAMES PATCH_STATES
     fi
-done
+
+    echo ""
+    log "Patch configuration:"
+    for i in "${!PATCH_NAMES[@]}"; do
+        if [[ "${PATCH_STATES[$i]}" == "on" ]]; then
+            echo -e "    ${GREEN}[x]${NC} ${PATCH_NAMES[$i]}"
+        else
+            echo -e "    ${DIM}[ ] ${PATCH_NAMES[$i]}${NC}"
+        fi
+    done
+    echo ""
+
+    CLI_PATCH_ARGS=("--exclusive")
+    for i in "${!PATCH_NAMES[@]}"; do
+        if [[ "${PATCH_STATES[$i]}" == "on" ]]; then
+            CLI_PATCH_ARGS+=("-e" "${PATCH_NAMES[$i]}")
+        fi
+    done
+
+    # Maps API key injection piggybacks on the resource patch's stringOption.
+    # Without it, tiles never render on sideloaded builds — Google locks the
+    # bundled key to Meetup's production cert fingerprint.
+    if [[ -n "$MAPS_KEY" ]]; then
+        CLI_PATCH_ARGS+=("-O" "mapsKey=$MAPS_KEY")
+        log "Maps API key: will be injected via the 'Inject Google Maps API key' patch"
+    else
+        warn "No Maps API key supplied. Pass --maps-key <KEY> or set MAPS_API_KEY=... or Maps will render blank."
+        warn "Sideloading re-signs the APK with our keystore; Meetup's bundled key is locked to their production cert."
+    fi
+fi
 
 # ── Setup work directory ───────────────────────────────────────────
 WORK_DIR="$SCRIPT_DIR/build/patch-work"
@@ -352,35 +511,60 @@ else
     BASE_APK="$APK_FILE"
 fi
 
-# ── Patch ──────────────────────────────────────────────────────────
+# ── Patch (skipped in --sign-only: signing step re-signs the original) ──
 PATCHED_APK="$WORK_DIR/patched-base.apk"
-log "Patching $(basename "$BASE_APK")..."
+if $SIGN_ONLY; then
+    cp "$BASE_APK" "$PATCHED_APK"
+    log "Sign-only: copied $(basename "$BASE_APK") unchanged"
+else
+    log "Patching $(basename "$BASE_APK")..."
 
-java -jar "$REVANCED_CLI" patch \
-    -p "$PATCHES_JAR" -b \
-    -o "$PATCHED_APK" \
-    --force \
-    "${CLI_PATCH_ARGS[@]}" \
-    "$BASE_APK" 2>&1 | while IFS= read -r line; do echo "    $line"; done
+    java -jar "$REVANCED_CLI" patch \
+        -p "$PATCHES_JAR" -b \
+        -o "$PATCHED_APK" \
+        --force \
+        "${CLI_PATCH_ARGS[@]}" \
+        "$BASE_APK" 2>&1 | while IFS= read -r line; do echo "    $line"; done
 
-[[ -f "$PATCHED_APK" ]] || err "Patched APK not produced"
-log "Patching complete"
+    [[ -f "$PATCHED_APK" ]] || err "Patched APK not produced"
+    log "Patching complete"
+fi
 
 # ── Signing ────────────────────────────────────────────────────────
-KEYSTORE="$WORK_DIR/sign.p12"
+# Persistent keystore under $HOME so the cert fingerprint stays stable across
+# patched builds: lets the user register the fingerprint against their own
+# Google Maps API key once, and also lets future patched installs upgrade
+# in-place instead of requiring an uninstall.
+KEYSTORE_DIR="${APK_PATCH_KIT_HOME:-$HOME/.apk-patch-kit}"
+KEYSTORE="$KEYSTORE_DIR/keystore.p12"
 KS_PASS="revanced"
 KS_ALIAS="key"
 
-log "Generating signing keystore..."
-keytool -genkeypair \
-    -keystore "$KEYSTORE" \
-    -storetype PKCS12 \
-    -storepass "$KS_PASS" \
-    -keypass "$KS_PASS" \
-    -alias "$KS_ALIAS" \
-    -keyalg RSA -keysize 2048 -validity 10000 \
-    -dname "CN=ReVanced" \
-    2>/dev/null
+mkdir -p "$KEYSTORE_DIR"
+if [[ ! -f "$KEYSTORE" ]]; then
+    log "Generating persistent signing keystore at $KEYSTORE ..."
+    keytool -genkeypair \
+        -keystore "$KEYSTORE" \
+        -storetype PKCS12 \
+        -storepass "$KS_PASS" \
+        -keypass "$KS_PASS" \
+        -alias "$KS_ALIAS" \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -dname "CN=ReVanced" \
+        2>/dev/null
+else
+    log "Using existing keystore: $KEYSTORE"
+fi
+
+# Emit SHA-1 + SHA-256 fingerprints. Users need SHA-1 to register this cert
+# against Google Cloud restrictions on their own Maps API key.
+KS_SHA1="$(keytool -list -v -keystore "$KEYSTORE" -storetype PKCS12 \
+    -storepass "$KS_PASS" -alias "$KS_ALIAS" 2>/dev/null \
+    | awk '/SHA1:/ {print $2; exit}')"
+if [[ -n "$KS_SHA1" ]]; then
+    echo -e "    ${DIM}Keystore cert SHA-1:${NC} $KS_SHA1"
+    echo -e "    ${DIM}Register this fingerprint against your Google Cloud Maps API key (restriction: Android apps → com.<pkg> + this SHA-1).${NC}"
+fi
 
 if $IS_APKS; then
     log "Signing all APKs with consistent keystore..."
@@ -422,8 +606,53 @@ if $IS_APKS; then
     log "Output: $OUTPUT_APKS"
     log "Size: $(du -h "$OUTPUT_APKS" | cut -f1)"
     echo ""
-    log "Install with:"
-    echo "    adb install-multiple $WORK_DIR/patched-splits/*.apk"
+    # The .apks filename is the package name (our add-app.sh writes it that
+    # way). Print install + update lines separately:
+    #   - First install: uninstall + install-multiple. Android refuses to
+    #     replace an APK signed by one cert with one signed by another, so
+    #     a Play-Store-built install must be removed first (data is wiped).
+    #   - Subsequent updates: install-multiple alone — same persistent
+    #     keystore means matching signatures, so the update keeps app data.
+    # Separate lines (not chained with `;` / `&`) keep this paste-safe in
+    # PowerShell too — PowerShell rejects `&` outright.
+    PKG_NAME="$APK_BASENAME"
+    INSTALL_TAIL="adb install-multiple -r -d"
+    for apk in "$WORK_DIR/patched-splits"/*.apk; do
+        INSTALL_TAIL="$INSTALL_TAIL \"$apk\""
+    done
+    log "First install (uninstall handles cert-mismatch against the Play Store build; ignore \"not installed\" if there's no prior copy):"
+    echo "    adb uninstall $PKG_NAME"
+    echo "    $INSTALL_TAIL"
+    echo ""
+    log "Subsequent updates (same keystore -> same signature -> in-place upgrade keeps app data):"
+    echo "    $INSTALL_TAIL"
+
+    if $INSTALL; then
+        ADB="$(locate_adb)" || err "--install requested but no adb found. Pass --adb <path>."
+        echo ""
+        log "Auto-install via $ADB"
+        if $REINSTALL; then
+            log "  Uninstalling $PKG_NAME (data will be wiped) ..."
+            "$ADB" uninstall "$PKG_NAME" || warn "  uninstall returned non-zero (likely 'not installed' — continuing)."
+        fi
+        # Translate paths for adb.exe on WSL.
+        adb_split_args=()
+        for apk in "$WORK_DIR/patched-splits"/*.apk; do
+            adb_split_args+=("$(adb_local_path "$apk")")
+        done
+        log "  Installing ${#adb_split_args[@]} APK(s) ..."
+        if "$ADB" install-multiple -r -d "${adb_split_args[@]}"; then
+            log "  Installed."
+        else
+            rc=$?
+            warn "  install-multiple failed (exit $rc)."
+            if ! $REINSTALL; then
+                warn "  If the failure was INSTALL_FAILED_UPDATE_INCOMPATIBLE / signature mismatch,"
+                warn "  re-run with --reinstall (wipes app data) to replace the existing differently-signed copy."
+            fi
+            exit $rc
+        fi
+    fi
 else
     APK_BASENAME="$(basename "$APK_FILE" .apk)"
     OUTPUT_APK="$SCRIPT_DIR/build/${APK_BASENAME}-patched.apk"
@@ -438,8 +667,38 @@ else
     log "Output: $OUTPUT_APK"
     log "Size: $(du -h "$OUTPUT_APK" | cut -f1)"
     echo ""
-    log "Install with:"
-    echo "    adb install \"$OUTPUT_APK\""
+    log "Install with (-r/-d allow reinstall and downgrade; add 'adb uninstall <pkg>' first if the device has a differently-signed copy):"
+    echo "    adb install -r -d \"$OUTPUT_APK\""
+
+    if $INSTALL; then
+        ADB="$(locate_adb)" || err "--install requested but no adb found. Pass --adb <path>."
+        echo ""
+        log "Auto-install via $ADB"
+        # Single-APK path: we don't know the package name without parsing the
+        # manifest. If the user passed --reinstall, we attempt uninstall via
+        # the README-derived package (when --app was used). Otherwise we just
+        # try the install and let it fail loudly on cert mismatch.
+        if $REINSTALL; then
+            if [[ -n "$PACKAGE" ]]; then
+                log "  Uninstalling $PACKAGE (data will be wiped) ..."
+                "$ADB" uninstall "$PACKAGE" || warn "  uninstall returned non-zero (likely 'not installed' — continuing)."
+            else
+                warn "  --reinstall set but no package name known (use --app or --package to enable uninstall)."
+            fi
+        fi
+        log "  Installing $(basename "$OUTPUT_APK") ..."
+        if "$ADB" install -r -d "$(adb_local_path "$OUTPUT_APK")"; then
+            log "  Installed."
+        else
+            rc=$?
+            warn "  install failed (exit $rc)."
+            if ! $REINSTALL; then
+                warn "  If the failure was INSTALL_FAILED_UPDATE_INCOMPATIBLE / signature mismatch,"
+                warn "  re-run with --reinstall (wipes app data) to replace the existing differently-signed copy."
+            fi
+            exit $rc
+        fi
+    fi
 fi
 
 echo ""

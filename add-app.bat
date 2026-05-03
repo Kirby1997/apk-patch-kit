@@ -9,6 +9,7 @@ rem   add-app.bat                                    Interactive device+package,
 rem   add-app.bat ^<package^>                          Package arg, name auto-derived
 rem   add-app.bat --name ^<shortname^> [package]       Force shortname, skip aapt derivation
 rem   add-app.bat --scaffold-only --name ^<n^> ^<pkg^>  Skip adb/aapt, create files only
+rem   add-app.bat --app-only                         Scaffold apps\^<name^>\ only; no patches\^<name^>\
 rem   add-app.bat --adb ^<path^>                       Override adb.exe location
 rem   add-app.bat --aapt ^<path^>                      Override aapt.exe location
 rem
@@ -27,6 +28,7 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 set "SCAFFOLD_ONLY=false"
+set "APP_ONLY=false"
 set "ADB_OVERRIDE="
 set "AAPT_OVERRIDE="
 set "APP_NAME="
@@ -38,6 +40,7 @@ mkdir "%TMP_DIR%" >nul 2>&1
 :parse
 if "%~1"=="" goto parsed
 if /I "%~1"=="--scaffold-only" (set "SCAFFOLD_ONLY=true" & shift & goto parse)
+if /I "%~1"=="--app-only"      (set "APP_ONLY=true" & shift & goto parse)
 if /I "%~1"=="--adb"           (set "ADB_OVERRIDE=%~2" & shift & shift & goto parse)
 if /I "%~1"=="--aapt"          (set "AAPT_OVERRIDE=%~2" & shift & shift & goto parse)
 if /I "%~1"=="--name"          (set "APP_NAME=%~2" & shift & shift & goto parse)
@@ -57,6 +60,7 @@ echo Usage: add-app.bat [package]
 echo.
 echo   --name ^<shortname^>    Override the auto-derived app shortname
 echo   --scaffold-only       Skip adb/aapt, create files only (requires --name and package)
+echo   --app-only            Scaffold apps\^<name^>\ only; no patches\^<name^>\ Gradle subproject
 echo   --adb ^<path^>          Override adb.exe binary location
 echo   --aapt ^<path^>         Override aapt.exe binary location
 echo   -h, --help            Show this help
@@ -247,7 +251,7 @@ if /I "!SCAFFOLD_ONLY!"=="false" if not defined APP_NAME (
     )
     call :derive_name
     if errorlevel 1 goto fail
-    echo [+] Derived shortname: !APP_NAME!
+    rem :derive_name writes a "[+] Derived shortname ..." line to stderr on success.
 )
 
 if not defined APP_NAME (
@@ -270,7 +274,7 @@ if exist "!APP_DIR!" (
     echo [-] Remove it first, or pass --name ^<other^> for a variant. 1>&2
     goto fail
 )
-if exist "!PATCHES_DIR!" (
+if /I not "!APP_ONLY!"=="true" if exist "!PATCHES_DIR!" (
     echo [-] patches\!APP_NAME! already exists. Remove it first. 1>&2
     goto fail
 )
@@ -294,48 +298,90 @@ if /I "!SCAFFOLD_ONLY!"=="false" (
 )
 
 rem === SHA-256 table ===================================================
+rem Enumerate via `dir /b` then filter by extension rather than using two
+rem globs (`*.apk` and `*.apks`). On NTFS, `for %%F in (*.apk)` also matches
+rem `.apks` files via the 8.3 short-name alias, producing a duplicate row
+rem for the bundle in the README.
 set "SHA_TMP=!TMP_DIR!\sha.txt"
 if exist "!SHA_TMP!" del "!SHA_TMP!"
-for %%F in ("!APP_DIR!\apks\*.apk" "!APP_DIR!\apks\*.apks") do (
-    if exist "%%~F" (
-        for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "(Get-FileHash -LiteralPath '%%~F' -Algorithm SHA256).Hash.ToLower()"`) do (
-            >>"!SHA_TMP!" echo ^| `%%~nxF` ^| `%%H` ^|
+for /f "usebackq delims=" %%F in (`dir /b /a-d "!APP_DIR!\apks" 2^>nul`) do (
+    set "_ext=%%~xF"
+    set "_match=false"
+    if /I "!_ext!"==".apk"  set "_match=true"
+    if /I "!_ext!"==".apks" set "_match=true"
+    if /I "!_ext!"==".xapk" set "_match=true"
+    if "!_match!"=="true" (
+        for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "(Get-FileHash -LiteralPath '!APP_DIR!\apks\%%F' -Algorithm SHA256).Hash.ToLower()"`) do (
+            >>"!SHA_TMP!" echo ^| `%%F` ^| `%%H` ^|
         )
     )
 )
 
 rem === Scaffold patches subproject =====================================
-echo [+] Scaffolding patches\!APP_NAME!...
-set "KT_DIR=!PATCHES_DIR!\src\main\kotlin\app\revanced\patches\!APP_NAME!"
-mkdir "!KT_DIR!" 2>nul
-type nul > "!KT_DIR!\.gitkeep"
+rem Skipped under --app-only: the app consumes an upstream patches bundle
+rem ^(patches-*.rvp at repo root^) via patch-apks.bat --patches ^<file^>.
+if /I not "!APP_ONLY!"=="true" (
+    echo [+] Scaffolding patches\!APP_NAME!...
+    set "KT_DIR=!PATCHES_DIR!\src\main\kotlin\app\revanced\patches\!APP_NAME!"
+    mkdir "!KT_DIR!" 2>nul
+    type nul > "!KT_DIR!\.gitkeep"
 
-(
-    echo plugins {
-    echo     alias^(libs.plugins.kotlin.jvm^)
-    echo }
-    echo.
-    echo dependencies {
-    echo     implementation^(libs.revanced.patcher^)
-    echo     implementation^(libs.smali^)
-    echo }
-    echo.
-    echo kotlin {
-    echo     jvmToolchain^(17^)
-    echo     compilerOptions {
-    echo         freeCompilerArgs.addAll^("-Xcontext-receivers", "-Xskip-prerelease-check"^)
-    echo     }
-    echo }
-    echo.
-    echo tasks.jar {
-    echo     archiveBaseName.set^("!APP_NAME!-patches"^)
-    echo }
-) > "!PATCHES_DIR!\build.gradle.kts"
+    (
+        echo plugins {
+        echo     alias^(libs.plugins.kotlin.jvm^)
+        echo }
+        echo.
+        echo dependencies {
+        echo     implementation^(libs.revanced.patcher^)
+        echo     implementation^(libs.smali^)
+        echo }
+        echo.
+        echo kotlin {
+        echo     jvmToolchain^(17^)
+        echo     compilerOptions {
+        echo         freeCompilerArgs.addAll^("-Xcontext-receivers", "-Xskip-prerelease-check"^)
+        echo     }
+        echo }
+        echo.
+        echo tasks.jar {
+        echo     archiveBaseName.set^("!APP_NAME!-patches"^)
+        echo }
+    ) > "!PATCHES_DIR!\build.gradle.kts"
+)
 
 rem === README ==========================================================
+rem Branches done via goto to avoid the nested `(...) > file` inside `if...else`
+rem pattern, which cmd's parser mishandles.
 if not defined APP_PACKAGE set "APP_PACKAGE=TODO-fill-in"
 if not defined APP_VERSION set "APP_VERSION=TODO-fill-in"
 
+if /I "!APP_ONLY!"=="true" goto readme_app_only_header
+goto readme_default_header
+
+:readme_app_only_header
+(
+    echo # !APP_NAME!
+    echo.
+    echo - **Package:** `!APP_PACKAGE!`
+    echo - **Target version:** `!APP_VERSION!`
+    echo - **Patches source:** upstream `patches.rvp` from ReVanced - **no `patches/!APP_NAME!/` subproject in this repo**.
+    echo.
+    echo This app consumes the upstream ReVanced patches bundle directly. Drop a `patches-^<ver^>.rvp` at the repo root ^(download from `https://api.revanced.app/v5/patches.rvp`, check the current version at `https://api.revanced.app/v5/patches/version`^), then run the patcher with `--patches`. The CLI only applies patches whose `compatibleWith` matches the APK's package.
+    echo.
+    echo ^> Scaffolded by `add-app.bat --app-only`. Re-running against the same package on any device produces the same layout.
+    echo.
+    echo ## APKs
+    echo.
+    echo The `apks/` directory is git-ignored - APKs are the vendor's IP. Obtain them yourself ^(or re-run `add-app.bat --app-only --name !APP_NAME! !APP_PACKAGE!` against a device that has the app installed^) and place them in `apks/`.
+    echo.
+    echo Expected files and checksums ^(SHA-256^):
+    echo.
+    echo ^| File ^| SHA-256 ^|
+    echo ^|------^|---------^|
+) > "!APP_DIR!\README.md"
+goto readme_sha
+
+:readme_default_header
 (
     echo # !APP_NAME!
     echo.
@@ -354,13 +400,38 @@ if not defined APP_VERSION set "APP_VERSION=TODO-fill-in"
     echo ^| File ^| SHA-256 ^|
     echo ^|------^|---------^|
 ) > "!APP_DIR!\README.md"
+goto readme_sha
 
+:readme_sha
 if exist "!SHA_TMP!" (
     type "!SHA_TMP!" >> "!APP_DIR!\README.md"
 ) else (
     >>"!APP_DIR!\README.md" echo ^| TODO ^| TODO ^|
 )
 
+if /I "!APP_ONLY!"=="true" goto readme_app_only_tail
+goto readme_default_tail
+
+:readme_app_only_tail
+(
+    echo.
+    echo ## Applying patches
+    echo.
+    echo From the repo root:
+    echo.
+    echo ```cmd
+    echo REM One-time: fetch the upstream bundle ^(use curl.exe, not curl, because
+    echo REM PowerShell aliases `curl` to Invoke-WebRequest which rejects curl flags^).
+    echo curl.exe -L -o patches.rvp https://api.revanced.app/v5/patches.rvp
+    echo.
+    echo patch-apks.bat --app !APP_NAME! --patches patches.rvp
+    echo ```
+    echo.
+    echo The interactive patch selector lists every patch in the bundle ^(hundreds^). Type `n` to deselect all, then pick the ones for this app by number.
+) >> "!APP_DIR!\README.md"
+goto readme_done
+
+:readme_default_tail
 (
     echo.
     echo ## Applying patches
@@ -379,14 +450,20 @@ if exist "!SHA_TMP!" (
     echo - Declare `compatibleWith^("!APP_PACKAGE!"^("!APP_VERSION!"^)^)`
     echo - Anchor fingerprints on fully-qualified class types rather than opcode patterns
 ) >> "!APP_DIR!\README.md"
+goto readme_done
+
+:readme_done
 
 rem === Wire into settings.gradle.kts ===================================
-findstr /C:":patches:!APP_NAME!" "!SETTINGS_FILE!" >nul
-if errorlevel 1 (
-    echo [+] Adding :patches:!APP_NAME! to settings.gradle.kts
-    >>"!SETTINGS_FILE!" echo include^(":patches:!APP_NAME!"^)
-) else (
-    echo [+] settings.gradle.kts already includes :patches:!APP_NAME!
+rem Skipped under --app-only: there's no Gradle subproject to register.
+if /I not "!APP_ONLY!"=="true" (
+    findstr /C:":patches:!APP_NAME!" "!SETTINGS_FILE!" >nul
+    if errorlevel 1 (
+        echo [+] Adding :patches:!APP_NAME! to settings.gradle.kts
+        >>"!SETTINGS_FILE!" echo include^(":patches:!APP_NAME!"^)
+    ) else (
+        echo [+] settings.gradle.kts already includes :patches:!APP_NAME!
+    )
 )
 
 rem === Summary =========================================================
@@ -396,13 +473,18 @@ echo.
 echo   App:      !APP_NAME!
 echo   Package:  !APP_PACKAGE!
 echo   Version:  !APP_VERSION!
-echo   Patches:  patches\!APP_NAME!\
+if /I not "!APP_ONLY!"=="true" echo   Patches:  patches\!APP_NAME!\
 echo   APKs:     apps\!APP_NAME!\apks\
 echo.
 echo   Next:
-echo     1. Drop .kt patch files under patches\!APP_NAME!\src\main\kotlin\app\revanced\patches\!APP_NAME!\
-echo     2. Run: gradlew.bat :patches:!APP_NAME!:build
-echo     3. Run: patch-apks.bat --app !APP_NAME!
+if /I "!APP_ONLY!"=="true" (
+    echo     1. Download upstream bundle: curl -L -o patches.rvp https://api.revanced.app/v5/patches.rvp
+    echo     2. Run: patch-apks.bat --app !APP_NAME! --patches patches.rvp
+) else (
+    echo     1. Drop .kt patch files under patches\!APP_NAME!\src\main\kotlin\app\revanced\patches\!APP_NAME!\
+    echo     2. Run: gradlew.bat :patches:!APP_NAME!:build
+    echo     3. Run: patch-apks.bat --app !APP_NAME!
+)
 echo.
 
 :cleanup_ok
@@ -484,24 +566,58 @@ goto pkg_prompt
 
 :derive_name
 rem Parse application-label from aapt badging output and sanitize.
-rem Writes a helper .ps1, runs it, captures the single-line result.
+rem
+rem Fallback chain (each step only runs if the prior returned nothing):
+rem   1. Bare `application-label:'...'` line in badging output
+rem   2. Any locale-suffixed variant: `application-label-en-US:'...'`, etc.
+rem      (some APKs only emit localized labels)
+rem   3. Last component of the package name (`com.strava` -^> `strava`)
+rem
+rem On complete failure, stderr gets the first 10 badging lines so the
+rem user can see what aapt actually produced.
+rem
+rem Writes a helper .ps1, runs it, captures the shortname on stdout.
+rem Warnings/diagnostics go to stderr via [Console]::Error so they don't
+rem contaminate the captured value.
 (
     echo $out = Get-Content -LiteralPath $env:PS_BADGING
     echo $label = $null
+    echo $source = ''
     echo foreach ^($line in $out^) {
     echo     if ^($line -match "^^application-label:'^(.+?^)'"^) {
-    echo         $label = $Matches[1]
-    echo         break
+    echo         $label = $Matches[1]; $source = 'application-label'; break
     echo     }
     echo }
-    echo if ^(-not $label^) { exit 1 }
+    echo if ^(-not $label^) {
+    echo     foreach ^($line in $out^) {
+    echo         if ^($line -match "^^application-label-[a-zA-Z0-9-]+:'^(.+?^)'"^) {
+    echo             $label = $Matches[1]; $source = 'localized application-label'; break
+    echo         }
+    echo     }
+    echo }
+    echo if ^(-not $label -and $env:PS_PACKAGE^) {
+    echo     $label = ^($env:PS_PACKAGE -split '\.'^)[-1]
+    echo     $source = 'package name suffix'
+    echo     [Console]::Error.WriteLine^("[!] No application-label in aapt badging. Falling back to package suffix: '$label'"^)
+    echo }
+    echo if ^(-not $label^) {
+    echo     [Console]::Error.WriteLine^("[-] No application-label and no package name fallback available."^)
+    echo     [Console]::Error.WriteLine^("[-] First 10 lines of aapt output:"^)
+    echo     $out ^| Select-Object -First 10 ^| ForEach-Object { [Console]::Error.WriteLine^("    $_"^) }
+    echo     exit 1
+    echo }
     echo $s = ^($label.ToLower^(^) -replace '[^^a-z0-9]',''^)
-    echo if ^(-not $s^) { exit 1 }
+    echo if ^(-not $s^) {
+    echo     [Console]::Error.WriteLine^("[-] Label '$label' sanitizes to empty string."^)
+    echo     exit 1
+    echo }
     echo if ^($s -notmatch '^^[a-z]'^) { $s = "a$s" }
+    echo [Console]::Error.WriteLine^("[+] Derived shortname '$s' from $source '$label'"^)
     echo $s
 ) > "!TMP_DIR!\derive.ps1"
 
 set "PS_BADGING=!TMP_DIR!\badging.txt"
+set "PS_PACKAGE=!APP_PACKAGE!"
 set "APP_NAME="
 for /f "usebackq delims=" %%N in (`powershell -NoProfile -ExecutionPolicy Bypass -File "!TMP_DIR!\derive.ps1"`) do set "APP_NAME=%%N"
 

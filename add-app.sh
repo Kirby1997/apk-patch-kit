@@ -7,6 +7,7 @@
 #   ./add-app.sh <package>                          # Non-interactive package, name auto-derived
 #   ./add-app.sh --name <shortname> [package]       # Force a shortname, skip aapt derivation
 #   ./add-app.sh --scaffold-only --name <name> <pkg># Skip adb/aapt, just create files
+#   ./add-app.sh --app-only                         # Scaffold apps/<name>/ only; no patches/<name>/
 #   ./add-app.sh --adb <path>                       # Override adb binary location
 #   ./add-app.sh --aapt <path>                      # Override aapt binary location
 #
@@ -39,6 +40,7 @@ err()  { echo -e "${RED}[-]${NC} $*" >&2; exit 1; }
 # ── Args ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCAFFOLD_ONLY=false
+APP_ONLY=false
 ADB_OVERRIDE=""
 AAPT_OVERRIDE=""
 APP_NAME=""
@@ -47,6 +49,7 @@ APP_PACKAGE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --scaffold-only) SCAFFOLD_ONLY=true; shift ;;
+        --app-only)      APP_ONLY=true; shift ;;
         --adb)           ADB_OVERRIDE="$2"; shift 2 ;;
         --aapt)          AAPT_OVERRIDE="$2"; shift 2 ;;
         --name)          APP_NAME="$2"; shift 2 ;;
@@ -322,15 +325,36 @@ build-tools, pass --aapt <path>, or pass --name <shortname> explicitly."
     fi
     log "Using aapt: $AAPT"
 
-    BADGING=$("$AAPT" dump badging "$(aapt_local_path "$BASE_APK_LOCAL")" 2>/dev/null || true)
-    # application-label:'Hidrate Spark' — take the quoted string after the FIRST
-    # application-label line (there can be locale-suffixed variants like
-    # application-label-en:'...' further down that we want to ignore).
+    # Capture stderr too so we can surface aapt errors on failure (some older
+    # build-tools aapt builds can't parse newer APKs and fail silently if 2>/dev/null).
+    BADGING=$("$AAPT" dump badging "$(aapt_local_path "$BASE_APK_LOCAL")" 2>&1 || true)
+
+    # Prefer bare `application-label:'...'` — Android picks this as the canonical
+    # label when the device locale has no localized override. Fall back to any
+    # locale-suffixed variant (`application-label-en:'...'`, etc.), since some
+    # APKs only emit localized labels. Final fallback: last component of the
+    # package name (`com.strava` → `strava`), because a derived name is always
+    # better than a hard error for users who just want to scaffold.
+    derived_from=""
     RAW_LABEL=$(echo "$BADGING" | awk -F"'" '/^application-label:/{print $2; exit}')
+    [[ -n "$RAW_LABEL" ]] && derived_from="application-label"
 
     if [[ -z "$RAW_LABEL" ]]; then
-        err "aapt produced no application-label for $BASE_APK_LOCAL. \
-The APK may be malformed. Pass --name <shortname> to override."
+        RAW_LABEL=$(echo "$BADGING" | awk -F"'" '/^application-label-[a-zA-Z0-9-]+:/{print $2; exit}')
+        [[ -n "$RAW_LABEL" ]] && derived_from="localized application-label"
+    fi
+
+    if [[ -z "$RAW_LABEL" ]]; then
+        warn "No application-label line in aapt output. First 10 lines:"
+        echo "$BADGING" | head -10 | sed 's/^/    /' >&2
+        if [[ -n "$APP_PACKAGE" ]]; then
+            RAW_LABEL="${APP_PACKAGE##*.}"
+            derived_from="package name suffix"
+            warn "Falling back to package name suffix: '$RAW_LABEL'"
+        else
+            err "aapt produced no application-label for $BASE_APK_LOCAL and no package name \
+is available as fallback. Pass --name <shortname> to override."
+        fi
     fi
 
     # Sanitize: lowercase, strip everything not a-z0-9. If the result starts
@@ -338,14 +362,14 @@ The APK may be malformed. Pass --name <shortname> to override."
     # leading-letter rule. Empty result (label was all symbols) → error.
     SANITIZED=$(echo "$RAW_LABEL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
     if [[ -z "$SANITIZED" ]]; then
-        err "Could not derive a valid shortname from label '$RAW_LABEL'. Pass --name <shortname>."
+        err "Could not derive a valid shortname from '$RAW_LABEL' (source: $derived_from). Pass --name <shortname>."
     fi
     if [[ ! "$SANITIZED" =~ ^[a-z] ]]; then
         SANITIZED="a$SANITIZED"
     fi
 
     APP_NAME="$SANITIZED"
-    log "Derived shortname from label '$RAW_LABEL': $APP_NAME"
+    log "Derived shortname '$APP_NAME' from $derived_from '$RAW_LABEL'"
 fi
 
 # Final validation (covers both user-supplied and derived names).
@@ -359,7 +383,9 @@ PATCHES_DIR="$SCRIPT_DIR/patches/$APP_NAME"
 
 [[ ! -d "$APP_DIR" ]]     || err "apps/$APP_NAME already exists — this app has been scaffolded before. \
 Remove it first if you want to recreate, or use --name <other> for a variant."
-[[ ! -d "$PATCHES_DIR" ]] || err "patches/$APP_NAME already exists. Remove it first if you want to recreate."
+if ! $APP_ONLY; then
+    [[ ! -d "$PATCHES_DIR" ]] || err "patches/$APP_NAME already exists. Remove it first if you want to recreate."
+fi
 
 # ── Move staged APKs into place ─────────────────────────────────────
 mkdir -p "$APP_DIR/apks"
@@ -391,11 +417,15 @@ if [[ -d "$APP_DIR/apks" ]]; then
 fi
 
 # ── Scaffold patches subproject ─────────────────────────────────────
-log "Scaffolding patches/$APP_NAME ..."
-KT_DIR="$PATCHES_DIR/src/main/kotlin/app/revanced/patches/$APP_NAME"
-mkdir -p "$KT_DIR"
+# Skipped under --app-only: the app consumes an upstream patches bundle
+# (patches-*.rvp at repo root) via patch-apks.sh --patches <file>, so no
+# local Gradle subproject is needed.
+if ! $APP_ONLY; then
+    log "Scaffolding patches/$APP_NAME ..."
+    KT_DIR="$PATCHES_DIR/src/main/kotlin/app/revanced/patches/$APP_NAME"
+    mkdir -p "$KT_DIR"
 
-cat >"$PATCHES_DIR/build.gradle.kts" <<EOF
+    cat >"$PATCHES_DIR/build.gradle.kts" <<EOF
 plugins {
     alias(libs.plugins.kotlin.jvm)
 }
@@ -417,11 +447,48 @@ tasks.jar {
 }
 EOF
 
-touch "$KT_DIR/.gitkeep"
+    touch "$KT_DIR/.gitkeep"
+fi
 
 # ── Scaffold apps/<name>/README.md ──────────────────────────────────
 log "Scaffolding apps/$APP_NAME/README.md ..."
-cat >"$APP_DIR/README.md" <<EOF
+if $APP_ONLY; then
+    cat >"$APP_DIR/README.md" <<EOF
+# $APP_NAME
+
+- **Package:** \`${APP_PACKAGE:-TODO-fill-in}\`
+- **Target version:** \`${APP_VERSION:-TODO-fill-in}\`
+- **Patches source:** upstream \`patches.rvp\` from ReVanced — **no \`patches/$APP_NAME/\` subproject in this repo**.
+
+This app consumes the upstream ReVanced patches bundle directly. Drop a \`patches-<ver>.rvp\` at the repo root (download from \`https://api.revanced.app/v5/patches.rvp\`, check the current version at \`https://api.revanced.app/v5/patches/version\`), then run the patcher with \`--patches\`. The CLI only applies patches whose \`compatibleWith\` matches the APK's package, so unrelated patches in the bundle are a no-op at apply time.
+
+> Scaffolded by \`add-app.sh --app-only\`. Re-running against the same package on any device produces the same layout.
+
+## APKs
+
+The \`apks/\` directory is git-ignored — APKs are the vendor's IP and cannot be redistributed here. Obtain them yourself (or re-run \`add-app.sh --app-only --name $APP_NAME $APP_PACKAGE\` against a device that has the app installed) and place them in \`apks/\`.
+
+Expected files and checksums (SHA-256):
+
+| File | SHA-256 |
+|------|---------|
+${SHA_LINES:-| TODO | TODO |}
+
+## Applying patches
+
+From the repo root:
+
+\`\`\`bash
+# One-time: fetch the upstream bundle
+curl -L -o patches.rvp https://api.revanced.app/v5/patches.rvp
+
+./patch-apks.sh --app $APP_NAME --patches patches.rvp
+\`\`\`
+
+The interactive patch selector lists every patch in the bundle (hundreds). Type \`n\` to deselect all, then pick the ones for this app by number.
+EOF
+else
+    cat >"$APP_DIR/README.md" <<EOF
 # $APP_NAME
 
 - **Package:** \`${APP_PACKAGE:-TODO-fill-in}\`
@@ -456,13 +523,17 @@ Place Kotlin patch files under \`${PATCHES_DIR#"$SCRIPT_DIR"/}/src/main/kotlin/a
 - Declare \`compatibleWith("${APP_PACKAGE:-TODO}"("${APP_VERSION:-TODO}"))\`
 - Anchor fingerprints on fully-qualified class types rather than opcode patterns
 EOF
+fi
 
 # ── Wire into settings.gradle.kts ───────────────────────────────────
-if grep -qE "^include\(\":patches:$APP_NAME\"\)" "$SETTINGS_FILE"; then
-    log "settings.gradle.kts already includes :patches:$APP_NAME"
-else
-    log "Adding :patches:$APP_NAME to settings.gradle.kts ..."
-    printf 'include(":patches:%s")\n' "$APP_NAME" >>"$SETTINGS_FILE"
+# Skipped under --app-only: there's no Gradle subproject to register.
+if ! $APP_ONLY; then
+    if grep -qE "^include\(\":patches:$APP_NAME\"\)" "$SETTINGS_FILE"; then
+        log "settings.gradle.kts already includes :patches:$APP_NAME"
+    else
+        log "Adding :patches:$APP_NAME to settings.gradle.kts ..."
+        printf 'include(":patches:%s")\n' "$APP_NAME" >>"$SETTINGS_FILE"
+    fi
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────
@@ -472,11 +543,18 @@ echo ""
 echo -e "  ${BOLD}App:${NC}         $APP_NAME"
 echo -e "  ${BOLD}Package:${NC}     ${APP_PACKAGE:-(not set — edit apps/$APP_NAME/README.md)}"
 echo -e "  ${BOLD}Version:${NC}     ${APP_VERSION:-(not set — edit apps/$APP_NAME/README.md)}"
-echo -e "  ${BOLD}Patches:${NC}     $(realpath --relative-to="$SCRIPT_DIR" "$PATCHES_DIR")/"
+if ! $APP_ONLY; then
+    echo -e "  ${BOLD}Patches:${NC}     $(realpath --relative-to="$SCRIPT_DIR" "$PATCHES_DIR")/"
+fi
 echo -e "  ${BOLD}APKs:${NC}        $(realpath --relative-to="$SCRIPT_DIR" "$APP_DIR")/apks/"
 echo ""
 echo -e "  ${DIM}Next:${NC}"
-echo -e "  ${DIM}  1. Drop .kt patch files under patches/$APP_NAME/src/main/kotlin/app/revanced/patches/$APP_NAME/${NC}"
-echo -e "  ${DIM}  2. Run: ./gradlew :patches:$APP_NAME:build${NC}"
-echo -e "  ${DIM}  3. Run: ./patch-apks.sh --app $APP_NAME${NC}"
+if $APP_ONLY; then
+    echo -e "  ${DIM}  1. Download upstream bundle: curl -L -o patches.rvp https://api.revanced.app/v5/patches.rvp${NC}"
+    echo -e "  ${DIM}  2. Run: ./patch-apks.sh --app $APP_NAME --patches patches.rvp${NC}"
+else
+    echo -e "  ${DIM}  1. Drop .kt patch files under patches/$APP_NAME/src/main/kotlin/app/revanced/patches/$APP_NAME/${NC}"
+    echo -e "  ${DIM}  2. Run: ./gradlew :patches:$APP_NAME:build${NC}"
+    echo -e "  ${DIM}  3. Run: ./patch-apks.sh --app $APP_NAME${NC}"
+fi
 echo ""

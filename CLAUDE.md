@@ -9,7 +9,8 @@ Guidance for Claude Code when working in this repo.
 Current apps:
 
 - **`hidratespark`** (`hidratenow.com.hidrate.hidrateandroid` v4.6.9) — bypass login, disable Google Play license check, unlock premium
-- **`meetup`** (`com.meetup` v2026.04.10.2881) — scaffolded, no patches yet
+- **`meetup`** (`com.meetup` v2026.04.10.2881) — disable intro paywall, disable profile paywall popup, unblur gated profile content
+- **`strava`** (`com.strava` v460.9) — **consumes upstream `patches.rvp` directly**, no `patches/strava/` subproject. Drop a `patches-<ver>.rvp` at the repo root and run `./patch-apks.sh --app strava --patches patches-<ver>.rvp`. Pattern used because the upstream Strava patches depend on a full Android/DEX extension toolchain (`extensions/strava/` library + stubs + shared `Utils`) that isn't ported here.
 
 ## Environment
 
@@ -19,6 +20,10 @@ Current apps:
 - **GitHub Packages auth:** the `revanced-patcher` dep lives on GitHub Packages. Store `gprUser` + `gprKey` (PAT with `read:packages`) in `~/.gradle/gradle.properties`, or export `GITHUB_ACTOR` + `GITHUB_TOKEN`. 401s during Gradle builds almost always mean these are missing or expired.
 - **apksigner:** needed for `.apks` signing. WSL: `sudo apt install apksigner`. Windows: `patch-apks.bat` looks on PATH, then scans `%ANDROID_HOME%`, `%ANDROID_SDK_ROOT%`, and `%LOCALAPPDATA%\Android\Sdk` for `build-tools\*\apksigner.bat` (newest wins). Android Studio is enough — no PATH edit needed.
 - **revanced-cli:** download a `revanced-cli-*.jar` from [revanced/revanced-cli](https://github.com/revanced/revanced-cli/releases) into the repo root. Not committed (see `.gitignore`).
+- **Decompile tooling on this host:**
+  - `apktool` is at `~/bin/apktool` (wrapper) → `~/bin/apktool_3.0.1.jar`. Already on `$PATH`. Use it for smali dumps; that's what the patcher fingerprints against.
+  - **`jadx` is NOT installed** in this WSL. Don't reach for it — work from the apktool smali tree directly. Install with `apt install jadx` if you really need Java pseudocode.
+  - Decompile dumps land under `apps/<app>/decompiled-apktool/` and are git-ignored via `apps/*/decompiled-*/` in `.gitignore` — never commit them, they're regenerable from the APK.
 
 ## Layout
 
@@ -54,6 +59,7 @@ All from the repo root.
 ./add-app.sh <package>                        # Non-interactive package, name auto-derived
 ./add-app.sh --name <shortname> [package]     # Force a shortname, skip aapt derivation
 ./add-app.sh --scaffold-only --name <n> <pkg> # Skip adb/aapt, just create files
+./add-app.sh --app-only [...]                 # Scaffold apps/<name>/ only, no patches/<name>/ subproject (for apps that consume an upstream patches.rvp — see strava)
 ./add-app.sh --adb <path>                     # Override adb.exe location
 ./add-app.sh --aapt <path>                    # Override aapt.exe location
 
@@ -89,33 +95,58 @@ Output lands in `build/<name>-patched.apks` (or `-patched.apk` for a single APK)
 4. Decompile for target-class discovery (usually necessary):
    ```bash
    cd apps/<name>
-   apktool d apks/base.apk -o decompiled-apktool
-   jadx -d decompiled-jadx apks/base.apk
+   apktool d apks/base.apk -o decompiled-apktool      # smali — required, this is what fingerprints match
+   # jadx -d decompiled-jadx apks/base.apk            # optional Java pseudocode — NOT installed in this WSL
    ```
+   `decompiled-apktool/` lays out one `smali_classes<N>/` per dex file plus `res/`, `AndroidManifest.xml`, and `assets/`. The directory is git-ignored (`apps/*/decompiled-*/` in `.gitignore`).
 5. Write `.kt` patches under `patches/<name>/src/main/kotlin/app/revanced/patches/<name>/<category>/`
 6. `./gradlew :patches:<name>:build`
 7. `./patch-apks.sh --app <name>`
 8. Install per the driver's printout.
 
+### Reverse-engineering recipes
+
+Re-deriving fingerprint targets is the slow part. Standard moves on a fresh decompile:
+
+- **Find user-facing strings** that label the screen/popup you're targeting:
+  `grep -iE "<keyword>" apps/<app>/decompiled-apktool/res/values/strings.xml`
+  Their string-resource names (e.g. `intro_paywall_*`, `meetup_plus_profile_cta_*`) often hint at the package + class names that consume them.
+- **Find smali dirs by domain noun** before grepping every dex:
+  `find apps/<app>/decompiled-apktool -type d -path '*<app>*' \( -iname '*paywall*' -o -iname '*upsell*' -o -iname '*plus*' \)`
+- **Find files referencing a fully-qualified type** (callers of an enum, paywall trigger, etc.):
+  `find apps/<app>/decompiled-apktool -name '*.smali' -exec grep -l '<FullyQualifiedSmaliType>' {} +`
+  Returns hot — backgrounded grep across all dex dirs takes 1–10 minutes on a large app like meetup. Run via Bash with `run_in_background: true`.
+- **Confirm method signature + access flags + locals count** before writing the fingerprint:
+  `grep -nE '\.method|\.locals' <smali file>` — match the signature exactly (return type, parameter types, name including any `-` Kotlin-mangled suffix). `.locals` matters because `addInstructions` cannot use registers above `.locals + parameter_count - 1`.
+- **Compose blur / paywall gates** are typically:
+  - `androidx.compose.ui.draw.BlurKt;->blur-*` for blur overlays — patching all four overloads to `return-object p0` no-ops every blur in the app.
+  - A static synthetic accessor on a feature interface (e.g. `Lcom/meetup/feature/profile/e;->a(...)V`) that wraps `ActivityResultLauncher.launch` for the paywall — `return-void` at offset 0 kills every popup that funnels through it.
+  - An `AppSettings` boolean getter (e.g. `isIntroPaywallEnabled()Z`) that the entry-point activity consults — return `0`.
+
 ### Writing a patch — template
 
-Every patch file has this shape. See `patches/hidratespark/` for three working examples.
+Every patch file has this shape. See `patches/hidratespark/` and `patches/meetup/` for working examples.
 
 ```kotlin
 package app.revanced.patches.<app>.<category>
 
-import app.revanced.patcher.extensions.InstructionExtensions.addInstructions
-import app.revanced.patcher.fingerprint
+import app.revanced.patcher.accessFlags
+import app.revanced.patcher.definingClass
+import app.revanced.patcher.extensions.addInstructions
+import app.revanced.patcher.gettingFirstMethodDeclaratively
+import app.revanced.patcher.name
+import app.revanced.patcher.parameterTypes
+import app.revanced.patcher.patch.BytecodePatchContext
 import app.revanced.patcher.patch.bytecodePatch
+import app.revanced.patcher.returnType
 import com.android.tools.smali.dexlib2.AccessFlags
 
-val <name>Fingerprint = fingerprint {
-    accessFlags(AccessFlags.PUBLIC)
-    returns("Z")
-    parameters()
-    custom { method, classDef ->
-        classDef.type == "L<package/slash/path>;" && method.name == "<methodName>"
-    }
+val BytecodePatchContext.<name>Method by gettingFirstMethodDeclaratively {
+    accessFlags(AccessFlags.PUBLIC, AccessFlags.FINAL)
+    returnType("Z")
+    parameterTypes()
+    definingClass("L<package/slash/path>;")
+    name("<methodName>")
 }
 
 @Suppress("unused")
@@ -125,8 +156,8 @@ val <name>Patch = bytecodePatch(
 ) {
     compatibleWith("<package>"("<version>"))
 
-    execute {
-        <name>Fingerprint.method.addInstructions(
+    apply {
+        <name>Method.addInstructions(
             0,
             """
                 const/4 v0, 0x1
@@ -212,9 +243,44 @@ Anchor points for the current patches — these are the obfuscated identifiers t
 
 Obfuscation is light and names are stable:
 
-- **Login gate:** `hidratenow.com.hidrate.hidrateandroid.activities.NoDisplayActivity#onCreate`, `parse.User#needsToUpdateUserParams`
 - **License check:** `com.pairip.licensecheck.LicenseContentProvider#onCreate`, `LicenseClient#initializeLicenseCheck`, `LicenseClient$1#run`
 - **Billing:** `com.hidrate.iap.BillingRepository#getIfUserHasPremium`, `com.hidrate.iap.localdb.GlowStudioEntitlement#isPurchased`
+
+> The bypass-login patch (`NoDisplayActivity#onCreate` + `parse.User#needsToUpdateUserParams`) was parked on branch `fix/hidratespark-bypass-login` — the rewritten `onCreate` doesn't launch MainActivity correctly on v4.6.9.
+
+### meetup (v2026.04.10.2881)
+
+Obfuscation is heavy; anchor on class type + method signature, not opcode patterns. Expect drift on every app release.
+
+- **Intro paywall:** `Lcom/meetup/base/settings/AppSettings;->isIntroPaywallEnabled()Z`
+- **Profile paywall launcher:** `Lcom/meetup/feature/profile/e;->a(Lcom/meetup/feature/profile/e;Lcom/meetup/shared/meetupplus/MeetupPlusPaywallType;Lcom/meetup/library/tracking/data/conversion/OriginType;Lcom/meetup/shared/groupstart/z;Lln/a;I)V` — the static accessor that calls `ActivityResultLauncher.launch` for every `MeetupPlusPaywallType` routed via the profile feature.
+- **Paywall activity chokepoints** — two intent factories, two eras. `Lwa/b;` (legacy) routes its `pswitch_4` to `Lcom/meetup/subscription/stepup/StepUpActivity;`; `Lwa/a;` (Compose-era) routes `pswitch_d` to `Lcom/meetup/feature/membersub/MemberSubActivity;` and `pswitch_b` to `Lcom/meetup/feature/membersub/MemberSubWebViewActivity;`. Profile and compose-message flows go through `wa/a.q` → MemberSubActivity, which is why the StepUp patch alone does not catch them. All three `onCreate` methods are patched the same way: `invoke-super` + `finish()` + `return-void`. Hilt parents are `Hilt_StepUpActivity`, `Hilt_MemberSubActivity`, `Hilt_MemberSubWebViewActivity` respectively.
+- **Trial banner composable:** `Lcom/meetup/feature/home/composables/x0;->d(ILandroidx/compose/runtime/Composer;Landroidx/compose/ui/Modifier;Lln/a;)V` — the `MeetupPlusTrialBanner` composable (identified via its own `traceEventStart` string `"com.meetup.feature.home.composables.MeetupPlusTrialBanner (YourGroupsSection.kt:442)"`). Embedded by home, notifications, explore, group, and profile screens; returning at offset 0 removes it everywhere.
+- **Attendees paywall composables:**
+  - `Log/f;->d(Ljava/lang/String;ILln/a;Lln/a;Llh/b;Log/h;Landroidx/compose/runtime/Composer;I)V` — `EventInsightsComponent` (event-page "Learn more about attendees / Unlock full details" teaser).
+  - `Lcom/meetup/shared/attendees/q;->e(ZLln/k;Landroidx/compose/runtime/Composer;I)V` — `AttendeeListMemberPlusUpsell` (Attendees list "Learn more about who will be there. Try for free." banner, uses `R.string.event_insights_cta_not_subscribed`).
+- **OneTrust cookie banner:** consent UI is gated by `Lcom/onetrust/otpublishers/headless/Public/OTPublishersHeadlessSDK;->shouldShowBanner()Z` — called from `IntroFragment` on fresh install. Returning `0` skips `setupUI`. Pin `getConsentStatusForGroupId(Ljava/lang/String;)I`, `getConsentStatusForGroupId(Ljava/lang/String;Ljava/lang/String;)I`, and `getConsentStatusForSDKId(Ljava/lang/String;)I` to `0` so downstream trackers that query per-category consent see "rejected".
+- **Blur overlays:** `Landroidx/compose/ui/draw/BlurKt;` overloads `blur-1fqS-gw`, `blur-1fqS-gw$default`, `blur-F8QBwvs`, `blur-F8QBwvs$default`
+- **Unprompted paywall flags** (not yet patched — belt-and-braces candidates if a popup slips past the Activity chokepoints): `Lcom/meetup/base/settings/AppSettings;->getShouldShowUnpromptedPaywall()Z`, `getShouldShowEventUnpromptedPaywall()Z`
+- **`MeetupPlusPaywallType` enum:** `Lcom/meetup/shared/meetupplus/MeetupPlusPaywallType;` with values `Messaging, Profile, Attendees, Waitlist, GroupMembers` — useful index when figuring out which feature's paywall flow you're looking at.
+
+### tinder (v17.15.0)
+
+Decompile dump under `apps/tinder/decompiled-apktool/` (gitignored). Heavy obfuscation; lots of single-letter file names. Anchor on class type + method signature.
+
+- **"Be Seen Faster" / "Upgrade Likes" Platinum popup:** layout `res/layout/platinum_likes_upsell_dialog_fragment.xml` uses `@string/upgrade_likes_title` ("Be Seen Faster"), `@string/upgrade_likes_subtitle` ("Increase your chance to get a match. With Tinder Platinum we'll prioritize your likes."), `@string/upgrade_likes` ("Upgrade Likes"). Owned by `Lcom/tinder/mylikes/ui/dialog/PlatinumLikesUpsellDialogFragment;` (extends `Lcom/tinder/feature/fastmatchfilters/internal/ui/filters/k;` → `Landroidx/appcompat/app/l0;` → `Landroidx/fragment/app/q;`/DialogFragment). Sole construction site is the deeplink router `Lcom/tinder/idverification/feature/internal/deeplink/b;` `pswitch_0`. Disable by patching `onCreateView(Landroid/view/LayoutInflater;Landroid/view/ViewGroup;Landroid/os/Bundle;)Landroid/view/View;` (`.locals 1`) at offset 0 with `invoke-virtual {p0}, Landroidx/fragment/app/q;->dismissAllowingStateLoss()V` + `const/4 p1, 0x0` + `return-object p1`.
+- **Sibling "MyLikes" Platinum upsell popup:** `Lcom/tinder/mylikes/ui/dialog/MyLikesUpsellDialogFragment;` — uses `my_likes_upsell_initial_entry_description` ("You've liked amazing people! Be Seen faster with Tinder Platinum"). Triggered from `Lcom/tinder/mylikes/ui/LikesSentFragment$observeViewEffect$1;->invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;` when the view-effect is `Lcom/tinder/mylikes/ui/k;`. Same dismissAllowingStateLoss strategy.
+- **Other DialogFragment-based upsells:**
+  - `Lcom/tinder/headlesspurchaseupsell/internal/view/HeadlessPurchaseUpsellDialogFragment;`
+  - `Lcom/tinder/primetimeboostupsell/internal/view/PrimetimeBoostUpsellDialogFragment;`
+  - `Lcom/tinder/boost/ui/upsell/BoostUpsellDialogFragment;`
+  - `Lcom/tinder/feature/secretadmirer/internal/view/SecretAdmirerUpsellDialogFragment;`
+- **Generic paywall chokepoint:** `Lcom/tinder/feature/paywallflow/internal/delegates/a;->c(Luc1/a;Landroidx/appcompat/app/n;)V` (`.locals 9`) is the `LaunchPaywallFlow.invoke` entry — every `paywallflow`-routed paywall passes through here. `return-void` at offset 0 nukes them all but probably also breaks legit purchases initiated via Settings → Get Tinder Plus etc.
+- **Dynamic paywall sheet:** `Lcom/tinder/dynamicpaywall/PaywallDialogFragment;` — instantiated by `Lcom/tinder/feature/paywallflow/internal/delegates/a;->b(...)` (the static `proceedToShowPaywall` handler). Same DialogFragment dismiss strategy works.
+- **Rec-card ads:** `smali_classes11/com/tinder/library/adsrecs/internal/rule/{a,b,d,e}.smali` — Kotlin obfuscated `AdMainCardStackInjectorImpl`/`AdCuratedCardStackInjectorImpl`. Each has a `shouldInsertAdRec` lambda generated as `*$shouldInsertAdRec$1.smali`. Returning false there should stop the swipe-stack ads. `Lcom/tinder/library/adsconfig/model/AdFeature;` enum lists `REWARDED_VIDEO_CARD_STACK_LIKES`/`_REWIND` — the two rewarded-video surfaces.
+- **Ads bouncer paywall (rewarded-video offer when out of likes/rewinds):** `Lcom/tinder/feature/adsbouncerpaywall/internal/presentation/RewardedVideoBottomSheet;` and `Lcom/tinder/rewardedvideomodal/internal/ui/RewardedVideoBottomSheetFragment;`. Both BottomSheetDialogFragments — same dismiss strategy.
+- **Ad SDKs bundled:** Facebook Audience Network (`smali_classes6/com/facebook/ads/*` — `RewardedVideoAd`, `NativeBannerAd`, `MediationBannerAdapter`), Google Mobile Ads (`smali_classes11/com/tinder/library/adsgoogle/internal/*`), Nimbus (`smali/com/tinder/adsnimbus/*`). All three are wired through `AdFeature` config and `adsrecs/internal/rule/*` injection rules — disabling at the rule layer is upstream of vendor.
+- **String-resource cheatsheet for grepping monetisation surfaces:** `paywall`, `upsell`, `boost_paywall_*`, `bouncer_paywall_*`, `discount_paywall_*`, `bundle_offer_paywall_*`, `tabbed_vertical_paywall_*`, `controlla_button_subscriptions_*`, `my_likes_upsell_*`, `upgrade_likes*`, `superlike_upsell_*`, `boost_upsell_*` — 273 distinct `paywall`/`upsell` string names total.
 
 ## Upstreaming
 

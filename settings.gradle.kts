@@ -30,3 +30,4 @@ rootProject.name = "apk-patch-kit"
 // Add new apps here as they are written (add-app.sh appends automatically).
 include(":patches:hidratespark")
 include(":patches:meetup")
+include(":patches:tinder")
