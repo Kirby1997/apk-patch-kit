@@ -39,3 +39,6 @@ Thumbs.db
 
 # Local settings
 .claude/settings.local.json
+
+# Personal scratchpad
+TODO.md
