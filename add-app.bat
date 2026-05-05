@@ -12,6 +12,7 @@ rem   add-app.bat --scaffold-only --name ^<n^> ^<pkg^>  Skip adb/aapt, create fi
 rem   add-app.bat --app-only                         Scaffold apps\^<name^>\ only; no patches\^<name^>\
 rem   add-app.bat --adb ^<path^>                       Override adb.exe location
 rem   add-app.bat --aapt ^<path^>                      Override aapt.exe location
+rem   add-app.bat --decompile                        Also apktool-decompile base.apk after scaffolding
 rem
 rem Name is derived from the APK's Application label via aapt dump badging so
 rem the same app always lands in apps\^<name^>\ regardless of who runs the
@@ -29,6 +30,7 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 set "SCAFFOLD_ONLY=false"
 set "APP_ONLY=false"
+set "DECOMPILE=false"
 set "ADB_OVERRIDE="
 set "AAPT_OVERRIDE="
 set "APP_NAME="
@@ -41,6 +43,7 @@ mkdir "%TMP_DIR%" >nul 2>&1
 if "%~1"=="" goto parsed
 if /I "%~1"=="--scaffold-only" (set "SCAFFOLD_ONLY=true" & shift & goto parse)
 if /I "%~1"=="--app-only"      (set "APP_ONLY=true" & shift & goto parse)
+if /I "%~1"=="--decompile"     (set "DECOMPILE=true" & shift & goto parse)
 if /I "%~1"=="--adb"           (set "ADB_OVERRIDE=%~2" & shift & shift & goto parse)
 if /I "%~1"=="--aapt"          (set "AAPT_OVERRIDE=%~2" & shift & shift & goto parse)
 if /I "%~1"=="--name"          (set "APP_NAME=%~2" & shift & shift & goto parse)
@@ -61,6 +64,7 @@ echo.
 echo   --name ^<shortname^>    Override the auto-derived app shortname
 echo   --scaffold-only       Skip adb/aapt, create files only (requires --name and package)
 echo   --app-only            Scaffold apps\^<name^>\ only; no patches\^<name^>\ Gradle subproject
+echo   --decompile           Also apktool-decompile base.apk after scaffolding
 echo   --adb ^<path^>          Override adb.exe binary location
 echo   --aapt ^<path^>         Override aapt.exe binary location
 echo   -h, --help            Show this help
@@ -463,6 +467,20 @@ if /I not "!APP_ONLY!"=="true" (
         >>"!SETTINGS_FILE!" echo include^(":patches:!APP_NAME!"^)
     ) else (
         echo [+] settings.gradle.kts already includes :patches:!APP_NAME!
+    )
+)
+
+rem === Optional decompile ==============================================
+rem --decompile shells out to decompile.bat, which apktool-decompiles
+rem base.apk into apps\^<name^>\decompiled-apktool\.
+if /I "!DECOMPILE!"=="true" (
+    if not exist "!APP_DIR!\apks\base.apk" (
+        echo [!] Skipping --decompile: apps\!APP_NAME!\apks\base.apk not present.
+    ) else if not exist "!SCRIPT_DIR!\decompile.bat" (
+        echo [!] Skipping --decompile: !SCRIPT_DIR!\decompile.bat not found.
+    ) else (
+        echo.
+        call "!SCRIPT_DIR!\decompile.bat" "!APP_NAME!" --force
     )
 )
 

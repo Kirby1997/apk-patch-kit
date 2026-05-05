@@ -10,6 +10,7 @@
 #   ./add-app.sh --app-only                         # Scaffold apps/<name>/ only; no patches/<name>/
 #   ./add-app.sh --adb <path>                       # Override adb binary location
 #   ./add-app.sh --aapt <path>                      # Override aapt binary location
+#   ./add-app.sh --decompile                        # Also run apktool on base.apk after scaffolding
 #
 # The app shortname is derived from the APK's Application label (via aapt
 # dump badging) so the same app always lands in the same apps/<name>/ directory
@@ -41,6 +42,7 @@ err()  { echo -e "${RED}[-]${NC} $*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCAFFOLD_ONLY=false
 APP_ONLY=false
+DECOMPILE=false
 ADB_OVERRIDE=""
 AAPT_OVERRIDE=""
 APP_NAME=""
@@ -50,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --scaffold-only) SCAFFOLD_ONLY=true; shift ;;
         --app-only)      APP_ONLY=true; shift ;;
+        --decompile)     DECOMPILE=true; shift ;;
         --adb)           ADB_OVERRIDE="$2"; shift 2 ;;
         --aapt)          AAPT_OVERRIDE="$2"; shift 2 ;;
         --name)          APP_NAME="$2"; shift 2 ;;
@@ -533,6 +536,21 @@ if ! $APP_ONLY; then
     else
         log "Adding :patches:$APP_NAME to settings.gradle.kts ..."
         printf 'include(":patches:%s")\n' "$APP_NAME" >>"$SETTINGS_FILE"
+    fi
+fi
+
+# ── Optional decompile ──────────────────────────────────────────────
+# --decompile shells out to ./decompile.sh, which apktool-decompiles base.apk
+# into apps/<name>/decompiled-apktool/. Done as a separate process so the
+# decompile script remains independently runnable on existing apps.
+if $DECOMPILE; then
+    if [[ ! -f "$APP_DIR/apks/base.apk" ]]; then
+        warn "Skipping --decompile: apps/$APP_NAME/apks/base.apk not present."
+    elif [[ ! -x "$SCRIPT_DIR/decompile.sh" ]]; then
+        warn "Skipping --decompile: $SCRIPT_DIR/decompile.sh not found or not executable."
+    else
+        echo ""
+        "$SCRIPT_DIR/decompile.sh" "$APP_NAME" --force
     fi
 fi
 

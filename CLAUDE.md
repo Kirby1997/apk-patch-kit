@@ -62,6 +62,12 @@ All from the repo root.
 ./add-app.sh --app-only [...]                 # Scaffold apps/<name>/ only, no patches/<name>/ subproject (for apps that consume an upstream patches.rvp — see strava)
 ./add-app.sh --adb <path>                     # Override adb.exe location
 ./add-app.sh --aapt <path>                    # Override aapt.exe location
+./add-app.sh --decompile [...]                # Also apktool-decompile base.apk after scaffolding
+
+# Decompile an existing app's base.apk → apps/<app>/decompiled-apktool/
+./decompile.sh                                # Interactive picker over apps/*
+./decompile.sh <app>                          # Decompile that app
+./decompile.sh <app> --force                  # Overwrite an existing dump
 
 # Build patches jars
 ./gradlew :patches:<app>:build                # One app
@@ -94,9 +100,9 @@ Output lands in `build/<name>-patched.apks` (or `-patched.apk` for a single APK)
    - Appends `include(":patches:<name>")` to `settings.gradle.kts` (idempotent)
 4. Decompile for target-class discovery (usually necessary):
    ```bash
-   cd apps/<name>
-   apktool d apks/base.apk -o decompiled-apktool      # smali — required, this is what fingerprints match
-   # jadx -d decompiled-jadx apks/base.apk            # optional Java pseudocode — NOT installed in this WSL
+   ./decompile.sh <name>                              # smali — required, this is what fingerprints match
+   # or pass --decompile to add-app.sh in step 2 to fold this into scaffolding.
+   # jadx -d decompiled-jadx apps/<name>/apks/base.apk  # optional Java pseudocode — NOT installed in this WSL
    ```
    `decompiled-apktool/` lays out one `smali_classes<N>/` per dex file plus `res/`, `AndroidManifest.xml`, and `assets/`. The directory is git-ignored (`apps/*/decompiled-*/` in `.gitignore`).
 5. Write `.kt` patches under `patches/<name>/src/main/kotlin/app/revanced/patches/<name>/<category>/`
