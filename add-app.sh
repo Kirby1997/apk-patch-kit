@@ -347,13 +347,58 @@ build-tools, pass --aapt <path>, or pass --name <shortname> explicitly."
         [[ -n "$RAW_LABEL" ]] && derived_from="localized application-label"
     fi
 
+    # Tier-3: parse `application: label='...'` line, which is universally
+    # emitted even when neither `application-label:` nor a localized variant
+    # appears (some aapt builds skip those for APKs whose label is only
+    # defined inside `<application>`). Two-stage pipeline so attribute
+    # order on the line doesn't matter.
     if [[ -z "$RAW_LABEL" ]]; then
-        warn "No application-label line in aapt output. First 10 lines:"
+        RAW_LABEL=$(echo "$BADGING" \
+            | grep -E "^application:" \
+            | grep -oE "label='[^']+'" \
+            | head -1 \
+            | sed -E "s/^label='(.*)'$/\1/")
+        [[ -n "$RAW_LABEL" ]] && derived_from="application: label= attribute"
+    fi
+
+    # Reject blank or non-alnum-only labels from any tier — fall through to
+    # package-suffix derivation. Some APKs (e.g. Met Office weather) have an
+    # android:label that resolves to a single space for the default locale.
+    if [[ -n "$RAW_LABEL" ]]; then
+        sanitize_check=$(echo "$RAW_LABEL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+        if [[ -z "$sanitize_check" ]]; then
+            warn "Got label '$RAW_LABEL' from $derived_from but it has no alphanumerics. Falling through."
+            RAW_LABEL=""
+            derived_from=""
+        fi
+    fi
+
+    if [[ -z "$RAW_LABEL" ]]; then
+        warn "No application-label or application: label= line in aapt output. application* lines:"
+        APP_LINES=$(echo "$BADGING" | grep -E "^application" | head -20)
+        if [[ -n "$APP_LINES" ]]; then
+            echo "$APP_LINES" | sed 's/^/    /' >&2
+        else
+            echo "    (none — aapt may be too old for this APK or wrote to stderr)" >&2
+        fi
+        warn "First 10 lines of aapt output for context:"
         echo "$BADGING" | head -10 | sed 's/^/    /' >&2
         if [[ -n "$APP_PACKAGE" ]]; then
-            RAW_LABEL="${APP_PACKAGE##*.}"
+            # Walk components right-to-left, skipping generic suffixes.
+            # `uk.gov.metoffice.weather.android` → `weather` (skip `android`);
+            # `com.strava` → `strava` (no skip needed).
+            generic_suffixes=" android app apps mobile client release main core free lite pro "
+            IFS='.' read -ra parts <<<"$APP_PACKAGE"
+            for ((i=${#parts[@]}-1; i>=0; i--)); do
+                lc=$(echo "${parts[$i]}" | tr '[:upper:]' '[:lower:]')
+                if [[ "$generic_suffixes" != *" $lc "* ]]; then
+                    RAW_LABEL="${parts[$i]}"
+                    break
+                fi
+            done
+            [[ -z "$RAW_LABEL" ]] && RAW_LABEL="${parts[-1]}"
             derived_from="package name suffix"
-            warn "Falling back to package name suffix: '$RAW_LABEL'"
+            warn "Falling back to package name suffix: '$RAW_LABEL' (pass --name <shortname> to override)"
         else
             err "aapt produced no application-label for $BASE_APK_LOCAL and no package name \
 is available as fallback. Pass --name <shortname> to override."

@@ -589,14 +589,18 @@ rem Fallback chain (each step only runs if the prior returned nothing):
 rem   1. Bare `application-label:'...'` line in badging output
 rem   2. Any locale-suffixed variant: `application-label-en-US:'...'`, etc.
 rem      (some APKs only emit localized labels)
-rem   3. Last component of the package name (`com.strava` -^> `strava`)
+rem   3. Last *non-generic* component of the package name. `uk.gov.met
+rem      office.weather.android` walks past the trailing `android` to
+rem      `weather`; pure `com.strava` still yields `strava`.
 rem
-rem On complete failure, stderr gets the first 10 badging lines so the
-rem user can see what aapt actually produced.
+rem When any fallback fires, the first 10 lines of badging.txt go to
+rem stderr so the user can see what aapt actually produced.
 rem
 rem Writes a helper .ps1, runs it, captures the shortname on stdout.
 rem Warnings/diagnostics go to stderr via [Console]::Error so they don't
-rem contaminate the captured value.
+rem contaminate the captured value. NOTE: do NOT use `!` characters in
+rem the echo lines below — cmd's delayed expansion eats unmatched `!`
+rem (and a chunk of surrounding text), corrupting the generated .ps1.
 (
     echo $out = Get-Content -LiteralPath $env:PS_BADGING
     echo $label = $null
@@ -613,10 +617,33 @@ rem contaminate the captured value.
     echo         }
     echo     }
     echo }
+    echo if ^(-not $label^) {
+    echo     foreach ^($line in $out^) {
+    echo         if ^($line -match "^^application:\s+.*?\blabel='^([^^']+^)'"^) {
+    echo             $label = $Matches[1]; $source = 'application: label='; break
+    echo         }
+    echo     }
+    echo }
+    rem Reject blank or non-alnum-only matches so we fall through to package suffix.
+    rem (e.g. android:label in the manifest resolves to a single space for default locale.)
+    echo if ^($label -and ^(-not ^($label -match '\S'^) -or -not ^($label.ToLower^(^) -replace '[^^a-z0-9]',''^)^)^) {
+    echo     [Console]::Error.WriteLine^("[W] Got label '$label' from $source but it's blank or has no alphanumerics. Falling through."^)
+    echo     $label = $null
+    echo }
     echo if ^(-not $label -and $env:PS_PACKAGE^) {
-    echo     $label = ^($env:PS_PACKAGE -split '\.'^)[-1]
+    echo     $generic = @^('android','app','apps','mobile','client','release','main','core','free','lite','pro'^)
+    echo     $parts = $env:PS_PACKAGE -split '\.'
+    echo     for ^($i = $parts.Length - 1; $i -ge 0; $i--^) {
+    echo         if ^($generic -notcontains $parts[$i].ToLower^(^)^) { $label = $parts[$i]; break }
+    echo     }
+    echo     if ^(-not $label^) { $label = $parts[-1] }
     echo     $source = 'package name suffix'
-    echo     [Console]::Error.WriteLine^("[!] No application-label in aapt badging. Falling back to package suffix: '$label'"^)
+    echo     [Console]::Error.WriteLine^("[W] No application-label in aapt badging. Falling back to package suffix: '$label'"^)
+    echo     [Console]::Error.WriteLine^("[W] application* lines in aapt output ^(empty = aapt produced none^):"^)
+    echo     $appLines = $out ^| Where-Object { $_ -match '^^application' }
+    echo     if ^($appLines^) { $appLines ^| Select-Object -First 20 ^| ForEach-Object { [Console]::Error.WriteLine^("    $_"^) } }
+    echo     else { [Console]::Error.WriteLine^("    ^(none^) — aapt may be too old for this APK or wrote to stderr"^) }
+    echo     [Console]::Error.WriteLine^("[W] Pass --name ^<shortname^> to override if the derived name is wrong."^)
     echo }
     echo if ^(-not $label^) {
     echo     [Console]::Error.WriteLine^("[-] No application-label and no package name fallback available."^)
@@ -626,7 +653,8 @@ rem contaminate the captured value.
     echo }
     echo $s = ^($label.ToLower^(^) -replace '[^^a-z0-9]',''^)
     echo if ^(-not $s^) {
-    echo     [Console]::Error.WriteLine^("[-] Label '$label' sanitizes to empty string."^)
+    echo     [Console]::Error.WriteLine^("[-] Label '$label' ^(from $source^) sanitizes to empty string."^)
+    echo     [Console]::Error.WriteLine^("[-] This APK has no usable label baked in. Re-run with --name ^<shortname^> ^(e.g. --name metoffice^)."^)
     echo     exit 1
     echo }
     echo if ^($s -notmatch '^^[a-z]'^) { $s = "a$s" }
