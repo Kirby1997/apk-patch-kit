@@ -31,3 +31,4 @@ rootProject.name = "apk-patch-kit"
 include(":patches:hidratespark")
 include(":patches:meetup")
 include(":patches:tinder")
+include(":patches:foldersync")
