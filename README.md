@@ -86,7 +86,7 @@ Every patch should:
 
 See `patches/hidratespark/`, `patches/meetup/`, and `patches/tinder/` for working examples — return-true injection, `return-void` chokepoints on activity `onCreate`, DialogFragment dismiss-and-return-null, Compose-overload no-ops, and a resource patch (`InjectMapsKeyPatch`) that rewrites a manifest `meta-data` value. Detailed conventions and a working template are in [`CLAUDE.md`](CLAUDE.md).
 
-> **High-locals gotcha:** `addInstructions` injects raw smali into the existing method, inheriting its `.locals` count. If `.locals + parameter_count > 16`, references to `p0`/`p1`/etc may land above v15 and 4-bit-register instructions (`const/4`, `invoke-virtual {...}` non-range form) will fail to assemble with `Invalid register: vNN`. Use `invoke-virtual/range {p0 .. p0}` and stash constants in a low local like `v0`. See `patches/tinder/.../DisableAdsBouncerPaywallPatch.kt` for the pattern.
+> **High-locals gotcha:** `addInstructions` injects raw smali into the existing method, inheriting its `.locals` count. If `.locals + parameter_count > 16`, references to `p0`/`p1`/etc may land above v15 and 4-bit-register instructions (`const/4`, `invoke-virtual {...}` non-range form) will fail to assemble with `Invalid register: vNN`. Use `invoke-virtual/range {p0 .. p0}` and stash constants in a low local like `v0`. See `patches/tinder/.../ads/DisableRewardedVideoPatch.kt` for the pattern.
 
 ## APKs
 

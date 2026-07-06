@@ -83,103 +83,20 @@ Output lands in `build/<name>-patched.apks` (or `-patched.apk` for a single APK)
 
 ## Workflows
 
-### Adding a new app end-to-end
+The operational how-to — adding an app end-to-end, reverse-engineering a
+fingerprint target, and the patch-file template — lives in the **`apk-patch`
+skill** (`.claude/skills/apk-patch/SKILL.md`). Invoke it when scaffolding an app,
+writing a patch, or building/applying patches. It drives `add-app.sh`,
+`decompile.sh`, `./gradlew`, and `patch-apks.sh`; this file keeps the reference
+data the skill points back to (Architecture, Target classes, Gotchas below).
 
-1. Connect device via USB, unlock, accept any adb auth prompt. Verify from **a Windows terminal** (not WSL): `adb.exe devices` should show `<serial>  device`.
-2. From WSL repo root: `./add-app.sh` — interactive, no args needed.
-3. What the script does:
-   - Locates `adb.exe` (WSL check + common SDK paths)
-   - Pre-starts the daemon with detached stdio + 10s timeout
-   - Locates `aapt.exe` (scans SDK `build-tools/*/aapt.exe`, picks newest — skipped if `--name` given)
-   - Lists third-party packages via `pm list packages -3` for interactive pick
-   - Runs `pm path <pkg>` to enumerate base + splits, pulls each to a tmpdir
-   - Derives shortname from `aapt dump badging`'s `application-label` (lowercased, non-alphanumerics stripped, leading digit prefixed with `a`). Duplicate detection fires if `apps/<derived>/` exists.
-   - Moves APKs into `apps/<name>/apks/`; bundles multi-APK installs into `apps/<name>/apks/<pkg>.apks` via `jar cMf`
-   - Extracts version via `dumpsys package <pkg>`, computes SHA-256s
-   - Writes `patches/<name>/build.gradle.kts`, empty Kotlin source tree, and `apps/<name>/README.md`
-   - Appends `include(":patches:<name>")` to `settings.gradle.kts` (idempotent)
-4. Decompile for target-class discovery (usually necessary):
-   ```bash
-   ./decompile.sh <name>                              # smali — required, this is what fingerprints match
-   # or pass --decompile to add-app.sh in step 2 to fold this into scaffolding.
-   # jadx -d decompiled-jadx apps/<name>/apks/base.apk  # optional Java pseudocode — NOT installed in this WSL
-   ```
-   `decompiled-apktool/` lays out one `smali_classes<N>/` per dex file plus `res/`, `AndroidManifest.xml`, and `assets/`. The directory is git-ignored (`apps/*/decompiled-*/` in `.gitignore`).
-5. Write `.kt` patches under `patches/<name>/src/main/kotlin/app/revanced/patches/<name>/<category>/`
-6. `./gradlew :patches:<name>:build`
-7. `./patch-apks.sh --app <name>`
-8. Install per the driver's printout.
-
-### Reverse-engineering recipes
-
-Re-deriving fingerprint targets is the slow part. Standard moves on a fresh decompile:
-
-- **Find user-facing strings** that label the screen/popup you're targeting:
-  `grep -iE "<keyword>" apps/<app>/decompiled-apktool/res/values/strings.xml`
-  Their string-resource names (e.g. `intro_paywall_*`, `meetup_plus_profile_cta_*`) often hint at the package + class names that consume them.
-- **Find smali dirs by domain noun** before grepping every dex:
-  `find apps/<app>/decompiled-apktool -type d -path '*<app>*' \( -iname '*paywall*' -o -iname '*upsell*' -o -iname '*plus*' \)`
-- **Find files referencing a fully-qualified type** (callers of an enum, paywall trigger, etc.):
-  `find apps/<app>/decompiled-apktool -name '*.smali' -exec grep -l '<FullyQualifiedSmaliType>' {} +`
-  Returns hot — backgrounded grep across all dex dirs takes 1–10 minutes on a large app like meetup. Run via Bash with `run_in_background: true`.
-- **Confirm method signature + access flags + locals count** before writing the fingerprint:
-  `grep -nE '\.method|\.locals' <smali file>` — match the signature exactly (return type, parameter types, name including any `-` Kotlin-mangled suffix). `.locals` matters because `addInstructions` cannot use registers above `.locals + parameter_count - 1`.
-- **Compose blur / paywall gates** are typically:
-  - `androidx.compose.ui.draw.BlurKt;->blur-*` for blur overlays — patching all four overloads to `return-object p0` no-ops every blur in the app.
-  - A static synthetic accessor on a feature interface (e.g. `Lcom/meetup/feature/profile/e;->a(...)V`) that wraps `ActivityResultLauncher.launch` for the paywall — `return-void` at offset 0 kills every popup that funnels through it.
-  - An `AppSettings` boolean getter (e.g. `isIntroPaywallEnabled()Z`) that the entry-point activity consults — return `0`.
-
-### Writing a patch — template
-
-Every patch file has this shape. See `patches/hidratespark/` and `patches/meetup/` for working examples.
-
-```kotlin
-package app.revanced.patches.<app>.<category>
-
-import app.revanced.patcher.accessFlags
-import app.revanced.patcher.definingClass
-import app.revanced.patcher.extensions.addInstructions
-import app.revanced.patcher.gettingFirstMethodDeclaratively
-import app.revanced.patcher.name
-import app.revanced.patcher.parameterTypes
-import app.revanced.patcher.patch.BytecodePatchContext
-import app.revanced.patcher.patch.bytecodePatch
-import app.revanced.patcher.returnType
-import com.android.tools.smali.dexlib2.AccessFlags
-
-val BytecodePatchContext.<name>Method by gettingFirstMethodDeclaratively {
-    accessFlags(AccessFlags.PUBLIC, AccessFlags.FINAL)
-    returnType("Z")
-    parameterTypes()
-    definingClass("L<package/slash/path>;")
-    name("<methodName>")
-}
-
-@Suppress("unused")
-val <name>Patch = bytecodePatch(
-    name = "<Human-readable patch name>",
-    description = "<What this does, user-facing>",
-) {
-    compatibleWith("<package>"("<version>"))
-
-    apply {
-        <name>Method.addInstructions(
-            0,
-            """
-                const/4 v0, 0x1
-                return v0
-            """,
-        )
-    }
-}
-```
-
-Conventions:
-
-- Fingerprint on **class type + method name + signature**, never on opcode patterns. Types survive obfuscation better than instruction sequences.
-- Always declare `compatibleWith("<package>"("<version>"))`. Omitting it silently no-ops against other versions.
-- For `return true` / `return false` / `return-void` patches, prepend `const/4` + `return` at offset 0 and leave the original body as dead code — simplest and most robust.
-- Fully rewrite a method only when the original flow is incompatible (see `BypassLoginPatch.kt` — replaces `NoDisplayActivity.onCreate` to forward straight to `MainActivity`).
+Patch-file convention: **one `bytecodePatch` object per feature** (each is
+selected by name via `patch-apks.sh -e "<Name>" --exclusive`), **grouped one file
+per `<category>`** where patches share a fingerprint shape or disable body — the
+patcher discovers patches by reflection regardless of file, so colocating keeps
+them independently selectable while sharing a `private const val` smali body.
+Worked examples: `patches/tinder/.../subscription/DisableUpsellDialogsPatch.kt`
+and `patches/meetup/.../subscription/DisableSubscriptionPaywallsPatch.kt`.
 
 ## Architecture
 
