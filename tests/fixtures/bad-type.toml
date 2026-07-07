@@ -1,9 +1,9 @@
 package = "x"
 app_version = "1"
-engine = "banana"
+engine = "revanced"
 apk = "a.apk"
 
 [[bundle]]
-type = "github"
+type = "ftp"
 repo = "a/b"
 version = "1"

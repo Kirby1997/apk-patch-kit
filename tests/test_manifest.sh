@@ -17,5 +17,6 @@ assert_eq "$(manifest_validate "$FX/hidratespark.toml" >/dev/null 2>&1; echo $?)
 assert_nonzero manifest_validate "$FX/bad-engine.toml"
 assert_nonzero manifest_validate "$FX/bad-local-morphe.toml"
 assert_nonzero manifest_validate "$FX/bad-nobundle.toml"
+assert_nonzero manifest_validate "$FX/bad-type.toml"
 
 t_summary
