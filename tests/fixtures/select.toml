@@ -1,0 +1,14 @@
+package = "x"
+app_version = "1"
+engine = "morphe"
+apk = "a.apkm"
+
+[[bundle]]
+type = "github"
+repo = "a/b"
+version = "1"
+
+[patches]
+exclusive = true
+enable = ["Remove Ads", "Show sensitive media"]
+disable = ["Custom font"]
