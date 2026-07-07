@@ -18,5 +18,6 @@ assert_nonzero manifest_validate "$FX/bad-engine.toml"
 assert_nonzero manifest_validate "$FX/bad-local-morphe.toml"
 assert_nonzero manifest_validate "$FX/bad-nobundle.toml"
 assert_nonzero manifest_validate "$FX/bad-type.toml"
+assert_eq "$(manifest_validate "$FX/url-ok.toml" >/dev/null 2>&1; echo $?)" "0" "url bundle valid"
 
 t_summary

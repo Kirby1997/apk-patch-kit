@@ -35,6 +35,26 @@ fetch_asset() {
   printf '%s' "$path"
 }
 
+fetch_url_key() { # url -> stable cache key
+  local url="$1" base; base="$(basename "${url%%\?*}")"
+  printf 'url_%s_%s' "$(printf '%s' "$url" | sha256sum | cut -c1-16)" "$base"
+}
+
+fetch_url() { # url sha256|-  -> prints cached path; downloads if absent
+  local url="$1" sha="$2"; mkdir -p "$FETCH_CACHE"
+  local path="$FETCH_CACHE/$(fetch_url_key "$url")"
+  if [ ! -f "$path" ]; then
+    curl -fsL -o "$path" "$url" || { rm -f "$path"; echo "fetch: download failed: $url" >&2; return 1; }
+  fi
+  if [ "$sha" != "-" ]; then
+    local got; got="$(sha256sum "$path" | cut -d' ' -f1)"
+    [ "$got" = "$sha" ] || { rm -f "$path"; echo "fetch: sha256 mismatch for $(fetch_url_key "$url") (got $got want $sha)" >&2; return 1; }
+  else
+    echo "fetch: $(fetch_url_key "$url") sha256=$(sha256sum "$path" | cut -d' ' -f1) (pin this in sources.toml)" >&2
+  fi
+  printf '%s' "$path"
+}
+
 ENGINES_TOML="${ENGINES_TOML:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/engines.toml}"
 BIN_DIR="${BIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin}"
 

@@ -26,6 +26,11 @@ resolve_bundles() { # json app_dir out_file
         sha="$(printf '%s' "$json" | jq -r ".bundle[$i].sha256 // \"-\"")"
         [ -n "$asset" ] || asset="$(_resolve_default_asset "$type" "$repo" "$ver")" || return 1
         fetch_asset "$type" "$repo" "$ver" "$asset" "$sha" >> "$out" || return 1; echo >> "$out" ;;
+      url)
+        local u sha
+        u="$(printf '%s' "$json" | jq -r ".bundle[$i].url")"
+        sha="$(printf '%s' "$json" | jq -r ".bundle[$i].sha256 // \"-\"")"
+        fetch_url "$u" "$sha" >> "$out" || return 1; echo >> "$out" ;;
       *) echo "resolve: bad bundle type $type" >&2; return 1 ;;
     esac
   done
