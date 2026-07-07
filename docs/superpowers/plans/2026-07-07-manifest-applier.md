@@ -730,6 +730,178 @@ git commit -m "feat(driver): manifest resolution path + --resolve-only plan prin
 
 ---
 
+## Task 7b: `url` bundle type
+
+Rationale: strava's `.rvp` is served from `https://api.revanced.app/v5/patches.rvp` (a plain URL, not a GitHub/GitLab release asset). Add a `url` bundle type so such prebuilt bundles can be pinned + fetched + cached like the others.
+
+**Files:**
+- Modify: `lib/fetch.sh` (add `fetch_url_key`, `fetch_url`)
+- Modify: `lib/manifest.sh` (allow `url` in the bundle-type validation set)
+- Modify: `lib/resolve.sh` (add `url)` case)
+- Test: `tests/test_fetch.sh` (pure key), `tests/test_manifest.sh` (url is a valid type)
+
+**Interfaces:**
+- Produces: `fetch_url_key <url> -> stable cache-key string`; `fetch_url <url> <sha256|-> -> cached path` (network, no unit test).
+
+- [ ] **Step 1: Failing test for `fetch_url_key` (append to `tests/test_fetch.sh` before `t_summary`)**
+
+```bash
+assert_eq "$(fetch_url_key https://api.revanced.app/v5/patches.rvp)" \
+  "url_$(printf %s https://api.revanced.app/v5/patches.rvp | sha256sum | cut -c1-16)_patches.rvp" "url key"
+```
+
+- [ ] **Step 2: Run → fails** (`fetch_url_key: command not found`). `bash tests/test_fetch.sh`.
+
+- [ ] **Step 3: Implement (append to `lib/fetch.sh`)**
+
+```bash
+fetch_url_key() { # url -> stable cache key
+  local url="$1" base; base="$(basename "${url%%\?*}")"
+  printf 'url_%s_%s' "$(printf '%s' "$url" | sha256sum | cut -c1-16)" "$base"
+}
+
+fetch_url() { # url sha256|-  -> prints cached path; downloads if absent
+  local url="$1" sha="$2"; mkdir -p "$FETCH_CACHE"
+  local path="$FETCH_CACHE/$(fetch_url_key "$url")"
+  if [ ! -f "$path" ]; then
+    curl -fsL -o "$path" "$url" || { rm -f "$path"; echo "fetch: download failed: $url" >&2; return 1; }
+  fi
+  if [ "$sha" != "-" ]; then
+    local got; got="$(sha256sum "$path" | cut -d' ' -f1)"
+    [ "$got" = "$sha" ] || { rm -f "$path"; echo "fetch: sha256 mismatch for $(fetch_url_key "$url") (got $got want $sha)" >&2; return 1; }
+  else
+    echo "fetch: $(fetch_url_key "$url") sha256=$(sha256sum "$path" | cut -d' ' -f1) (pin this in sources.toml)" >&2
+  fi
+  printf '%s' "$path"
+}
+```
+
+- [ ] **Step 4: Run → passes** (`pass=4 fail=0`). `bash tests/test_fetch.sh`.
+
+- [ ] **Step 5: Allow `url` in manifest validation**
+
+In `lib/manifest.sh` `manifest_validate`, change the bundle-type check to include `url`:
+```bash
+  if printf '%s' "$json" | jq -e '.bundle[] | select((.type // "") as $t | ($t|IN("github","gitlab","local","url"))|not)' >/dev/null; then
+    echo "manifest: bundle.type must be github|gitlab|local|url" >&2; return 1; fi
+```
+Add a fixture `tests/fixtures/url-ok.toml`:
+```toml
+package = "com.strava"
+app_version = "460.9"
+engine = "revanced"
+apk = "apks/com.strava.apks"
+
+[[bundle]]
+type = "url"
+url = "https://api.revanced.app/v5/patches.rvp"
+```
+Append assertion to `tests/test_manifest.sh` before `t_summary`:
+```bash
+assert_eq "$(manifest_validate "$FX/url-ok.toml" >/dev/null 2>&1; echo $?)" "0" "url bundle valid"
+```
+
+- [ ] **Step 6: Run → passes** (`pass=14 fail=0`). `bash tests/test_manifest.sh`.
+
+- [ ] **Step 7: Add the `url)` case to `resolve.sh` `resolve_bundles`**
+
+Inside the `case "$type" in` block, add before the `*)` arm:
+```bash
+      url)
+        local u sha
+        u="$(printf '%s' "$json" | jq -r ".bundle[$i].url")"
+        sha="$(printf '%s' "$json" | jq -r ".bundle[$i].sha256 // \"-\"")"
+        fetch_url "$u" "$sha" >> "$out" || return 1; echo >> "$out" ;;
+```
+
+- [ ] **Step 8: Full suite + commit**
+
+```bash
+bash tests/run.sh 2>/dev/null || for t in tests/test_*.sh; do bash "$t"; done
+git add lib/fetch.sh lib/manifest.sh lib/resolve.sh tests/test_fetch.sh tests/test_manifest.sh tests/fixtures/url-ok.toml
+git commit -m "feat(fetch): url bundle type for prebuilt .rvp/.mpp from a plain URL"
+```
+
+---
+
+## Task 7c: revanced manifest apps reuse the legacy sign/repack pipeline
+
+Rationale: the manifest branch self-runs `java` and self-signs a single APK — correct for morphe (one merged universal APK). But revanced apps install as multi-split `.apks` bundles needing the existing extract→patch→sign-all-splits→repack pipeline. Rather than duplicate that, revanced manifest apps set the resolved inputs and **fall through** to the legacy pipeline (which already honors pre-set `REVANCED_CLI`/`APK_FILE`/`PATCHES_JAR`).
+
+**Files:**
+- Modify: `patch-apks.sh` (split the manifest branch by engine)
+- Test: manual `--resolve-only` for both a morphe and a revanced manifest (Task 8)
+
+**Interfaces:** none new.
+
+- [ ] **Step 1: Restructure the manifest branch** so only morphe self-completes; revanced sets vars and falls through.
+
+Replace the body after `mapfile -t CLI_ARGS ...` (the `if RESOLVE_ONLY ... java ... exit 0` block) with an engine split. The new branch shape:
+
+```bash
+if [ -n "$MANIFEST" ]; then
+    manifest_validate "$MANIFEST" || exit 1
+    JSON="$(manifest_to_json "$MANIFEST")"
+    ENGINE="$(printf '%s' "$JSON" | jq -r '.engine')"
+    APKREL="$(printf '%s' "$JSON" | jq -r '.apk')"
+    APP_DIR="apps/$APP"; APK_IN="$APP_DIR/$APKREL"
+    [ -f "$APK_IN" ] || err "manifest apk not found: $APK_IN"
+    CLI_JAR="$(engine_cli_path "$ENGINE")" || exit 1
+    BUNDLES_FILE="$(mktemp)"; trap 'rm -f "$BUNDLES_FILE"' EXIT
+    resolve_bundles "$JSON" "$APP_DIR" "$BUNDLES_FILE" || exit 1
+
+    if [ "$ENGINE" = morphe ]; then
+        OUT_APK="build/${APP}-patched.apk"; mkdir -p build
+        mapfile -t CLI_ARGS < <(engine_morphe_args "$JSON" "$CLI_JAR" "$APK_IN" "$OUT_APK" "$BUNDLES_FILE")
+        if [ "${RESOLVE_ONLY:-false}" = true ]; then
+            echo "app:     $APP"; echo "engine:  morphe"; echo "cli:     $CLI_JAR"; echo "input:   $APK_IN"
+            echo "bundles:"; sed 's/^/  /' "$BUNDLES_FILE"
+            echo "command: java ${CLI_ARGS[*]}"; exit 0
+        fi
+        java "${CLI_ARGS[@]}" || err "patching failed"
+        echo "Patched → $OUT_APK"
+        echo "Install: \"\$ADB\" install \"$(wslpath -w "$PWD/$OUT_APK" 2>/dev/null || echo "$PWD/$OUT_APK")\""
+        exit 0
+    fi
+
+    # revanced: feed the legacy pipeline (it already extracts .apks, patches base,
+    # signs every split with one key, and repacks). Legacy honors these pre-set vars.
+    REVANCED_CLI="$CLI_JAR"
+    APK_FILE="$APK_IN"
+    PATCHES_JAR="$(head -1 "$BUNDLES_FILE")"     # legacy applies one bundle; revanced manifests pin one
+    NO_UI=true                                    # apply all default-enabled patches (manifest reproducible)
+    if [ "${RESOLVE_ONLY:-false}" = true ]; then
+        echo "app:     $APP"; echo "engine:  revanced (→ legacy pipeline)"; echo "cli:     $REVANCED_CLI"
+        echo "input:   $APK_FILE"; echo "bundles:"; sed 's/^/  /' "$BUNDLES_FILE"
+        echo "(revanced manifest apps run the legacy extract/patch/sign/repack path)"; exit 0
+    fi
+    # fall through — do NOT exit; legacy pipeline below uses REVANCED_CLI/APK_FILE/PATCHES_JAR/NO_UI
+fi
+```
+
+Note: keep the `_LIB` sourcing, the `--resolve-only` flag, and the gate (`MANIFEST` computed from `--app` + no override + `sources.toml` exists) exactly as Task 7 left them. Only the inside-the-branch engine split changes. Remove the old unconditional `rm -f "$BUNDLES_FILE"` lines (the `trap` now handles cleanup on every exit path — fixes the Task-7 review's Minor temp-leak finding).
+
+- [ ] **Step 2: Verify legacy honors the pre-set vars**
+
+Read `patch-apks.sh` below the branch: confirm `REVANCED_CLI` is only auto-picked `if [[ -z "$REVANCED_CLI" ]]`, `PATCHES_JAR` only looked up `if [[ -z "$PATCHES_JAR" ]]`, and `APK_FILE` is used when set. If any unconditionally overwrites a pre-set value, adjust to respect it. Report the exact guard lines.
+
+- [ ] **Step 3: Syntax + regression**
+
+```bash
+bash -n patch-apks.sh && echo OK
+for t in tests/test_*.sh; do bash "$t"; done   # all fail=0
+./patch-apks.sh --help >/dev/null && echo "help OK"
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add patch-apks.sh
+git commit -m "feat(driver): revanced manifest apps reuse legacy sign/repack; trap-clean temp"
+```
+
+---
+
 ## Task 8: Migration — write `sources.toml` for all apps
 
 **Files:**
