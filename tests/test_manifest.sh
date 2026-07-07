@@ -9,4 +9,6 @@ assert_eq "$(manifest_get "$FX/twitter.toml" '.package')" "com.twitter.android" 
 assert_eq "$(manifest_get "$FX/twitter.toml" '.bundle | length')" "2" "twitter bundle count"
 assert_eq "$(manifest_get "$FX/twitter.toml" '.bundle[0].repo')" "crimera/piko" "twitter bundle0 repo"
 assert_eq "$(manifest_get "$FX/hidratespark.toml" '.bundle[0].type')" "local" "hs bundle type"
+assert_eq "$(manifest_get "$FX/twitter.toml" '.patches.exclusive')" "false" "present false preserved"
+assert_eq "$(manifest_get "$FX/twitter.toml" '.patches.nonexistent')" "" "absent field empty"
 t_summary
