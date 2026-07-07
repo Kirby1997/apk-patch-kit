@@ -16,13 +16,17 @@ fetch_asset() {
   mkdir -p "$FETCH_CACHE"
   local key path url; key="$(fetch_cache_key "$host" "$repo" "$ver" "$asset")"; path="$FETCH_CACHE/$key"
   if [ ! -f "$path" ]; then
-    case "$host" in
-      github) url="$(gh api "repos/$repo/releases/tags/$ver" \
-                 --jq ".assets[]|select(.name==\"$asset\")|.browser_download_url")" ;;
-      gitlab) url="$(curl -s "https://gitlab.com/api/v4/projects/$(fetch_gitlab_project_id "$repo")/releases/$ver" \
-                 | jq -r ".assets.links[]|select(.name==\"$asset\")|.url")" ;;
-      *) echo "fetch: unknown host $host" >&2; return 1 ;;
-    esac
+    local tag
+    for tag in "$ver" "v${ver#v}"; do
+      case "$host" in
+        github) url="$(gh api "repos/$repo/releases/tags/$tag" \
+                   --jq ".assets[]|select(.name==\"$asset\")|.browser_download_url" 2>/dev/null)" || url="" ;;
+        gitlab) url="$(curl -s "https://gitlab.com/api/v4/projects/$(fetch_gitlab_project_id "$repo")/releases/$tag" \
+                   | jq -r ".assets.links[]|select(.name==\"$asset\")|.url")" ;;
+        *) echo "fetch: unknown host $host" >&2; return 1 ;;
+      esac
+      [ -n "$url" ] && [ "$url" != null ] && break
+    done
     [ -n "$url" ] && [ "$url" != null ] || { echo "fetch: asset not found: $host $repo $ver $asset" >&2; return 1; }
     curl -fsL -o "$path" "$url" || { rm -f "$path"; echo "fetch: download failed: $url" >&2; return 1; }
   fi

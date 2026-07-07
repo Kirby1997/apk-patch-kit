@@ -37,11 +37,14 @@ resolve_bundles() { # json app_dir out_file
 }
 
 _resolve_default_asset() { # type repo ver -> first *.mpp/*.rvp asset name
-  local type="$1" repo="$2" ver="$3" name
-  case "$type" in
-    github) name="$(gh api "repos/$repo/releases/tags/$ver" --jq '.assets[].name' | grep -Ei '\.(mpp|rvp)$' | head -1)" ;;
-    gitlab) name="$(curl -s "https://gitlab.com/api/v4/projects/$(fetch_gitlab_project_id "$repo")/releases/$ver" | jq -r '.assets.links[].name' | grep -Ei '\.(mpp|rvp)$' | head -1)" ;;
-  esac
+  local type="$1" repo="$2" ver="$3" name="" tag
+  for tag in "$ver" "v${ver#v}"; do
+    case "$type" in
+      github) name="$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets[].name' 2>/dev/null | grep -Ei '\.(mpp|rvp)$' | head -1)" ;;
+      gitlab) name="$(curl -s "https://gitlab.com/api/v4/projects/$(fetch_gitlab_project_id "$repo")/releases/$tag" | jq -r '.assets.links[].name' 2>/dev/null | grep -Ei '\.(mpp|rvp)$' | head -1)" ;;
+    esac
+    [ -n "$name" ] && break
+  done
   [ -n "$name" ] || { echo "resolve: no .mpp/.rvp asset in $repo $ver" >&2; return 1; }
   printf '%s' "$name"
 }
