@@ -1,0 +1,8 @@
+package     = "com.tinder"
+app_version = "17.15.0"
+engine      = "revanced"
+apk         = "apks/com.tinder.apks"
+
+[[bundle]]
+type = "local"
+project = "tinder"

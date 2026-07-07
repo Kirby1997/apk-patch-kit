@@ -1,0 +1,8 @@
+package     = "com.meetup"
+app_version = "2026.04.10.2881"
+engine      = "revanced"
+apk         = "apks/com.meetup.apks"
+
+[[bundle]]
+type = "local"
+project = "meetup"

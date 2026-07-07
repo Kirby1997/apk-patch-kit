@@ -1,5 +1,5 @@
 [revanced]
-version = "TBD-at-migration"   # replaced with a real revanced-cli tag in Task 8
+version = "6.0.0"
 
 [morphe]
 version = "1.9.1"
