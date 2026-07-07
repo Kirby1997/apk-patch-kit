@@ -379,21 +379,35 @@ if [ -n "$MANIFEST" ]; then
     APP_DIR="apps/$APP"; APK_IN="$APP_DIR/$APKREL"
     [ -f "$APK_IN" ] || err "manifest apk not found: $APK_IN"
     CLI_JAR="$(engine_cli_path "$ENGINE")" || exit 1
-    BUNDLES_FILE="$(mktemp)"
+    BUNDLES_FILE="$(mktemp)"; trap 'rm -f "$BUNDLES_FILE"' EXIT
     resolve_bundles "$JSON" "$APP_DIR" "$BUNDLES_FILE" || exit 1
-    OUT_APK="build/${APP}-patched.apk"; mkdir -p build
-    mapfile -t CLI_ARGS < <(engine_"${ENGINE}"_args "$JSON" "$CLI_JAR" "$APK_IN" "$OUT_APK" "$BUNDLES_FILE")
-    if [ "${RESOLVE_ONLY:-false}" = true ]; then
-        echo "app:     $APP"; echo "engine:  $ENGINE"; echo "cli:     $CLI_JAR"; echo "input:   $APK_IN"
-        echo "bundles:"; sed 's/^/  /' "$BUNDLES_FILE"
-        echo "command: java ${CLI_ARGS[*]}"
-        rm -f "$BUNDLES_FILE"; exit 0
+
+    if [ "$ENGINE" = morphe ]; then
+        OUT_APK="build/${APP}-patched.apk"; mkdir -p build
+        mapfile -t CLI_ARGS < <(engine_morphe_args "$JSON" "$CLI_JAR" "$APK_IN" "$OUT_APK" "$BUNDLES_FILE")
+        if [ "${RESOLVE_ONLY:-false}" = true ]; then
+            echo "app:     $APP"; echo "engine:  morphe"; echo "cli:     $CLI_JAR"; echo "input:   $APK_IN"
+            echo "bundles:"; sed 's/^/  /' "$BUNDLES_FILE"
+            echo "command: java ${CLI_ARGS[*]}"; exit 0
+        fi
+        java "${CLI_ARGS[@]}" || err "patching failed"
+        echo "Patched → $OUT_APK"
+        echo "Install: \"\$ADB\" install \"$(wslpath -w "$PWD/$OUT_APK" 2>/dev/null || echo "$PWD/$OUT_APK")\""
+        exit 0
     fi
-    java "${CLI_ARGS[@]}" || err "patching failed"
-    rm -f "$BUNDLES_FILE"
-    echo "Patched → $OUT_APK"
-    echo "Install: \"\$ADB\" install \"$(wslpath -w "$PWD/$OUT_APK" 2>/dev/null || echo "$PWD/$OUT_APK")\""
-    exit 0
+
+    # revanced: feed the legacy pipeline (it already extracts .apks, patches base,
+    # signs every split with one key, and repacks). Legacy honors these pre-set vars.
+    REVANCED_CLI="$CLI_JAR"
+    APK_FILE="$APK_IN"
+    PATCHES_JAR="$(head -1 "$BUNDLES_FILE")"     # legacy applies one bundle; revanced manifests pin one
+    NO_UI=true                                    # apply all default-enabled patches (manifest reproducible)
+    if [ "${RESOLVE_ONLY:-false}" = true ]; then
+        echo "app:     $APP"; echo "engine:  revanced (→ legacy pipeline)"; echo "cli:     $REVANCED_CLI"
+        echo "input:   $APK_FILE"; echo "bundles:"; sed 's/^/  /' "$BUNDLES_FILE"
+        echo "(revanced manifest apps run the legacy extract/patch/sign/repack path)"; exit 0
+    fi
+    # fall through — do NOT exit; legacy pipeline below uses REVANCED_CLI/APK_FILE/PATCHES_JAR/NO_UI
 fi
 # --- legacy path continues below unchanged ---
 
