@@ -1,0 +1,4 @@
+package = "x"
+app_version = "1"
+engine = "revanced"
+apk = "a.apk"

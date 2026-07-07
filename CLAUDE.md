@@ -11,6 +11,11 @@ Current apps:
 - **`hidratespark`** (`hidratenow.com.hidrate.hidrateandroid` v4.6.9) — bypass login, disable Google Play license check, unlock premium
 - **`meetup`** (`com.meetup` v2026.04.10.2881) — disable intro paywall, disable profile paywall popup, unblur gated profile content
 - **`strava`** (`com.strava` v460.9) — **consumes upstream `patches.rvp` directly**, no `patches/strava/` subproject. Drop a `patches-<ver>.rvp` at the repo root and run `./patch-apks.sh --app strava --patches patches-<ver>.rvp`. Pattern used because the upstream Strava patches depend on a full Android/DEX extension toolchain (`extensions/strava/` library + stubs + shared `Utils`) that isn't ported here.
+- **`twitter`** / X (`com.twitter.android` v12.4.1-release.0) — patches written (disable sensitive-media blur, remove promoted timeline items, pairip bypass) but **not shippable: X is PairIP-wrapped and its native VM SIGSEGVs on any re-signed sideload**. See the twitter Target-classes note. Kept as RE reference; needs root (Frida/LSPosed) to defeat. For X ads without root, use an **older pre-PairIP Twitter APK (≤ ~10.86)** + ReVanced's own `twitter/misc/hook/HideAdsHookPatch` (targets 10.60/10.86).
+
+**Universal (app-agnostic) patch subproject:**
+
+- **`patches/pairip/`** → `pairip-patches.jar` — **no `apps/` dir, no `compatibleWith`**. `DisablePairipLicenseCheckPatch` universally bypasses PairIP's *licensecheck* (the Java Play-ownership gate: `com.pairip.licensecheck.LicenseContentProvider.onCreate` / `LicenseClient.initializeLicenseCheck` / `checkLicense` / `LicenseClient$1.run`). Each surface is `runCatching`-guarded so it applies to whatever a given app contains (provider-flavor like hidratespark, or application-flavor like X). Matches by class presence; `revanced-cli list-patches -b --universal-patches` shows it. **Defeats only licensecheck — NOT PairIP's native VM/integrity** (see twitter note). Apply to any app with `./patch-apks.sh --patches patches/pairip/build/libs/pairip-patches.jar --apk <file>`.
 
 ## Environment
 
@@ -83,103 +88,20 @@ Output lands in `build/<name>-patched.apks` (or `-patched.apk` for a single APK)
 
 ## Workflows
 
-### Adding a new app end-to-end
+The operational how-to — adding an app end-to-end, reverse-engineering a
+fingerprint target, and the patch-file template — lives in the **`apk-patch`
+skill** (`.claude/skills/apk-patch/SKILL.md`). Invoke it when scaffolding an app,
+writing a patch, or building/applying patches. It drives `add-app.sh`,
+`decompile.sh`, `./gradlew`, and `patch-apks.sh`; this file keeps the reference
+data the skill points back to (Architecture, Target classes, Gotchas below).
 
-1. Connect device via USB, unlock, accept any adb auth prompt. Verify from **a Windows terminal** (not WSL): `adb.exe devices` should show `<serial>  device`.
-2. From WSL repo root: `./add-app.sh` — interactive, no args needed.
-3. What the script does:
-   - Locates `adb.exe` (WSL check + common SDK paths)
-   - Pre-starts the daemon with detached stdio + 10s timeout
-   - Locates `aapt.exe` (scans SDK `build-tools/*/aapt.exe`, picks newest — skipped if `--name` given)
-   - Lists third-party packages via `pm list packages -3` for interactive pick
-   - Runs `pm path <pkg>` to enumerate base + splits, pulls each to a tmpdir
-   - Derives shortname from `aapt dump badging`'s `application-label` (lowercased, non-alphanumerics stripped, leading digit prefixed with `a`). Duplicate detection fires if `apps/<derived>/` exists.
-   - Moves APKs into `apps/<name>/apks/`; bundles multi-APK installs into `apps/<name>/apks/<pkg>.apks` via `jar cMf`
-   - Extracts version via `dumpsys package <pkg>`, computes SHA-256s
-   - Writes `patches/<name>/build.gradle.kts`, empty Kotlin source tree, and `apps/<name>/README.md`
-   - Appends `include(":patches:<name>")` to `settings.gradle.kts` (idempotent)
-4. Decompile for target-class discovery (usually necessary):
-   ```bash
-   ./decompile.sh <name>                              # smali — required, this is what fingerprints match
-   # or pass --decompile to add-app.sh in step 2 to fold this into scaffolding.
-   # jadx -d decompiled-jadx apps/<name>/apks/base.apk  # optional Java pseudocode — NOT installed in this WSL
-   ```
-   `decompiled-apktool/` lays out one `smali_classes<N>/` per dex file plus `res/`, `AndroidManifest.xml`, and `assets/`. The directory is git-ignored (`apps/*/decompiled-*/` in `.gitignore`).
-5. Write `.kt` patches under `patches/<name>/src/main/kotlin/app/revanced/patches/<name>/<category>/`
-6. `./gradlew :patches:<name>:build`
-7. `./patch-apks.sh --app <name>`
-8. Install per the driver's printout.
-
-### Reverse-engineering recipes
-
-Re-deriving fingerprint targets is the slow part. Standard moves on a fresh decompile:
-
-- **Find user-facing strings** that label the screen/popup you're targeting:
-  `grep -iE "<keyword>" apps/<app>/decompiled-apktool/res/values/strings.xml`
-  Their string-resource names (e.g. `intro_paywall_*`, `meetup_plus_profile_cta_*`) often hint at the package + class names that consume them.
-- **Find smali dirs by domain noun** before grepping every dex:
-  `find apps/<app>/decompiled-apktool -type d -path '*<app>*' \( -iname '*paywall*' -o -iname '*upsell*' -o -iname '*plus*' \)`
-- **Find files referencing a fully-qualified type** (callers of an enum, paywall trigger, etc.):
-  `find apps/<app>/decompiled-apktool -name '*.smali' -exec grep -l '<FullyQualifiedSmaliType>' {} +`
-  Returns hot — backgrounded grep across all dex dirs takes 1–10 minutes on a large app like meetup. Run via Bash with `run_in_background: true`.
-- **Confirm method signature + access flags + locals count** before writing the fingerprint:
-  `grep -nE '\.method|\.locals' <smali file>` — match the signature exactly (return type, parameter types, name including any `-` Kotlin-mangled suffix). `.locals` matters because `addInstructions` cannot use registers above `.locals + parameter_count - 1`.
-- **Compose blur / paywall gates** are typically:
-  - `androidx.compose.ui.draw.BlurKt;->blur-*` for blur overlays — patching all four overloads to `return-object p0` no-ops every blur in the app.
-  - A static synthetic accessor on a feature interface (e.g. `Lcom/meetup/feature/profile/e;->a(...)V`) that wraps `ActivityResultLauncher.launch` for the paywall — `return-void` at offset 0 kills every popup that funnels through it.
-  - An `AppSettings` boolean getter (e.g. `isIntroPaywallEnabled()Z`) that the entry-point activity consults — return `0`.
-
-### Writing a patch — template
-
-Every patch file has this shape. See `patches/hidratespark/` and `patches/meetup/` for working examples.
-
-```kotlin
-package app.revanced.patches.<app>.<category>
-
-import app.revanced.patcher.accessFlags
-import app.revanced.patcher.definingClass
-import app.revanced.patcher.extensions.addInstructions
-import app.revanced.patcher.gettingFirstMethodDeclaratively
-import app.revanced.patcher.name
-import app.revanced.patcher.parameterTypes
-import app.revanced.patcher.patch.BytecodePatchContext
-import app.revanced.patcher.patch.bytecodePatch
-import app.revanced.patcher.returnType
-import com.android.tools.smali.dexlib2.AccessFlags
-
-val BytecodePatchContext.<name>Method by gettingFirstMethodDeclaratively {
-    accessFlags(AccessFlags.PUBLIC, AccessFlags.FINAL)
-    returnType("Z")
-    parameterTypes()
-    definingClass("L<package/slash/path>;")
-    name("<methodName>")
-}
-
-@Suppress("unused")
-val <name>Patch = bytecodePatch(
-    name = "<Human-readable patch name>",
-    description = "<What this does, user-facing>",
-) {
-    compatibleWith("<package>"("<version>"))
-
-    apply {
-        <name>Method.addInstructions(
-            0,
-            """
-                const/4 v0, 0x1
-                return v0
-            """,
-        )
-    }
-}
-```
-
-Conventions:
-
-- Fingerprint on **class type + method name + signature**, never on opcode patterns. Types survive obfuscation better than instruction sequences.
-- Always declare `compatibleWith("<package>"("<version>"))`. Omitting it silently no-ops against other versions.
-- For `return true` / `return false` / `return-void` patches, prepend `const/4` + `return` at offset 0 and leave the original body as dead code — simplest and most robust.
-- Fully rewrite a method only when the original flow is incompatible (see `BypassLoginPatch.kt` — replaces `NoDisplayActivity.onCreate` to forward straight to `MainActivity`).
+Patch-file convention: **one `bytecodePatch` object per feature** (each is
+selected by name via `patch-apks.sh -e "<Name>" --exclusive`), **grouped one file
+per `<category>`** where patches share a fingerprint shape or disable body — the
+patcher discovers patches by reflection regardless of file, so colocating keeps
+them independently selectable while sharing a `private const val` smali body.
+Worked examples: `patches/tinder/.../subscription/DisableUpsellDialogsPatch.kt`
+and `patches/meetup/.../subscription/DisableSubscriptionPaywallsPatch.kt`.
 
 ## Architecture
 
@@ -194,6 +116,41 @@ Five stages in order — if something breaks, identify which:
 5. **Repackage.** Splits are `jar cMf`'d back into `build/<name>-patched.apks`. Original inputs are never modified.
 
 `--exclusive` is load-bearing: without it, any patch marked default-enabled in the jar would run even when deselected.
+
+### Manifest applier (`apps/<app>/sources.toml`)
+
+Additive, opt-in layer on top of the legacy pipeline above. `patch-apks.sh --app <app>` checks for `apps/<app>/sources.toml` first (only when `--apk`/`--patches` aren't given); if present, `lib/manifest.sh` + `lib/fetch.sh` + `lib/resolve.sh` + `lib/engine-{morphe,revanced}.sh` take over resolution — no interactive picker, no manual jar path. Every app, including the ones with a local `patches/<app>` subproject, can carry a manifest; it's the preferred way to describe "how to patch this app" going forward.
+
+**`sources.toml` schema:**
+
+```toml
+package     = "com.example.app"        # required
+app_version = "1.2.3"                  # required, informational
+engine      = "morphe" | "revanced"    # required — see engine rule below
+apk         = "apks/base.apk"          # required, path relative to apps/<app>/
+
+[[bundle]]                             # one or more, applied in order
+type = "github"                        # github | gitlab | local | url
+repo = "owner/repo"                    # github/gitlab only
+version = "1.2.3"                      # github/gitlab/url pin (tries "$v" then "v$v" as release tag)
+asset = "patches-1.2.3.mpp"            # optional; auto-detected (*.mpp/*.rvp) if omitted
+sha256 = "..."                         # optional; "-" or omitted logs the hash instead of enforcing it
+project = "foldersync"                 # local only — gradle-builds patches/<project>
+url = "https://.../patches.rvp"        # url only — plain prebuilt-bundle download
+
+[patches]                              # optional — omit to apply every default-enabled patch
+enable = ["Patch name"]
+disable = ["Other patch"]
+exclusive = true                       # maps to --exclusive
+```
+
+- **`engines.toml`** (repo root) pins one version per engine: `[morphe].version`, `[revanced].version`. `engine_cli_path` in `lib/fetch.sh` reads it, downloads the matching `morphe-cli-<ver>-all.jar` / `revanced-cli-<ver>-all.jar` from its GitHub releases, and caches it at `bin/<engine>-cli.jar`. `bin/` and `.cache/bundles/` (resolved `[[bundle]]` downloads, keyed by host+repo+version+asset) are both `.gitignore`d and self-populate on first run — nothing under either needs to be committed or pre-fetched.
+- **One engine per app.** `manifest_validate` rejects anything but `engine = "morphe"` or `engine = "revanced"` — an app can't mix bundles from both patchers in one manifest.
+- **`type = "local"` implies `engine = "revanced"`** (validated, not just convention) — `patches/<project>` subprojects are ReVanced-patcher Kotlin, morphe can't consume them.
+- **`--resolve-only`** prints the resolved engine, CLI jar path, input APK, every resolved bundle path, and the exact command that would run, then exits 0 without patching or downloading anything not already needed for resolution — use it to sanity-check a manifest edit before committing to a multi-minute patch run.
+- **Two very different output shapes**, both driven by the same `engine` field:
+  - **`morphe`** apps (currently just `twitter`, the reference example — see its `sources.toml`) merge every split in the input `.apks`/`.apkm` into one universal APK, apply all bundles' patches via `morphe-cli`, and self-sign — output is a single `build/<app>-patched.apk`, install with plain `adb install`.
+  - **`revanced`** apps set `REVANCED_CLI`/`APK_FILE`/`PATCHES_JAR`/`NO_UI` from the manifest and **fall through** into the unchanged legacy pipeline (stages 1–5 above): extract `.apks`, patch `base.apk` only, sign every split with one per-run keystore, repackage to `build/<app>-patched.apks`. This is why `foldersync`, `hidratespark`, `meetup`, `metoffice`, `strava`, and `tinder` moved to manifests without any change to how their output is produced or installed (`strava` uses `type = "url"` to pull the upstream `.rvp` instead of `type = "local"`, everything else builds its own `patches/<app>` jar).
 
 ### Scaffolding pipeline (`add-app.sh`)
 
@@ -287,6 +244,30 @@ Decompile dump under `apps/tinder/decompiled-apktool/` (gitignored). Heavy obfus
 - **Ads bouncer paywall (rewarded-video offer when out of likes/rewinds):** `Lcom/tinder/feature/adsbouncerpaywall/internal/presentation/RewardedVideoBottomSheet;` and `Lcom/tinder/rewardedvideomodal/internal/ui/RewardedVideoBottomSheetFragment;`. Both BottomSheetDialogFragments — same dismiss strategy.
 - **Ad SDKs bundled:** Facebook Audience Network (`smali_classes6/com/facebook/ads/*` — `RewardedVideoAd`, `NativeBannerAd`, `MediationBannerAdapter`), Google Mobile Ads (`smali_classes11/com/tinder/library/adsgoogle/internal/*`), Nimbus (`smali/com/tinder/adsnimbus/*`). All three are wired through `AdFeature` config and `adsrecs/internal/rule/*` injection rules — disabling at the rule layer is upstream of vendor.
 - **String-resource cheatsheet for grepping monetisation surfaces:** `paywall`, `upsell`, `boost_paywall_*`, `bouncer_paywall_*`, `discount_paywall_*`, `bundle_offer_paywall_*`, `tabbed_vertical_paywall_*`, `controlla_button_subscriptions_*`, `my_likes_upsell_*`, `upgrade_likes*`, `superlike_upsell_*`, `boost_upsell_*` — 273 distinct `paywall`/`upsell` string names total.
+
+### twitter / X (v12.4.1-release.0)
+
+Two model layers coexist: **legacy** `Lcom/twitter/model/...;` + `Lcom/twitter/tweetview/...;` (Java/RxJava era, delegate-binder UI) and **new** `Lcom/x/...;` (Kotlin, kotlinx-serialization models, Flow/Compose URT pipeline). Obfuscation is single-letter class names (`a`, `b`, … `g4`) but package paths + method signatures survive — anchor on those.
+
+- **Sensitive-media "content warning" blur** (legacy tweetview path). The blur overlay is `Lcom/twitter/sensitivemedia/ui/widget/SensitiveMediaBlurPreviewInterstitialView;`, toggled VISIBLE(0x0)/GONE(0x8) by `SensitiveMediaBlurPreviewInterstitialViewDelegateBinder.d(...)` and its ViewStub sibling `...tombstone/j.smali`. **Both gate on one static predicate** `Lcom/twitter/tweetview/core/k;->a(Lcom/twitter/tweetview/core/t;Lcom/twitter/ui/renderable/i;Lcom/twitter/account/model/x;)Z` — returns true only when the tweetview sensitive-media state resolves to `e$a`. Force it `return 0` → interstitial never inflates/shows, media renders unblurred. Patched in `patches/twitter/.../sensitivemedia/DisableSensitiveMediaBlurPatch.kt`. (The full non-blur tombstone that *replaces* media is a different, uncovered surface — this only touches the blur-preview overlay, which is the "flashes then hides" symptom.)
+- **Promoted / ad timeline items** (new `com/x` URT path). The shared URT repo `Lcom/x/repositories/urt/g;` reads the persisted timeline from the DB as `Flow<List<UrtTimelineItem>>`, runs an onEach-style operator whose side-effect action is the SuspendLambda `Lcom/x/repositories/urt/e;->invokeSuspend(...)` (the list is in its field `n`), then scribe flow `k` → distinctUntilChanged → stateIn into MutableStateFlow `g.x` (exposed by `g.w()`). **Every** surface (home/profile/list/search/bookmark/communities/ntab/videotab) delegates to this one `g`, and `o1` forwards the *same* list instance downstream — so mutating that list inside `e.invokeSuspend` removes items from all timelines at once, no row, no gap. Promoted-item oracle: `Lcom/x/repositories/urt/b;->b(Lcom/x/models/timelines/items/UrtTimelineItem;)Lcom/x/repositories/urt/b$a;` returns non-null iff the item carries `Lcom/x/models/TimelinePromotedMetadata;` (covers `UrtTimelinePost`, `EventSummary`/`UrtTimelineEventSummary`, `TimelineTrend`/`UrtTimelineTrend`). Patched in `patches/twitter/.../ads/RemovePromotedTimelineItemsPatch.kt`.
+  - Ad-signal source getters (if the oracle drifts): `Lcom/x/models/timelines/items/UrtTimelinePost;->getPromotedMetadata()` (= `component5`), same on `EventSummary`, `TimelineTrend`, `UrtTimelineUser`. `Lcom/x/repositories/urt/g;->S(Ljava/util/List;)V` is a small non-suspend seen-set/snapshot recorder (updates `z.c` + entryId set) — **not** the render path, do not filter there.
+  - Note `Lcom/x/repositories/home/i0;` already filters promoted for a narrow author-subset feature — it is not the general feed; there is no built-in global ad filter (ads are server-injected to be shown).
+  - **⚑ SUPERSEDED (2026-07-07): X IS sideload-patchable UNROOTED at v12.2.0 via Morphe + x-shim.** The "BLOCKED by PairIP" analysis below is correct *for 12.4.1* but the conclusion "unusable at every version / root-only" is **wrong** — see the "RESULT" + "SUCCESS" bullets under the `inotia00/x-shim` entry lower in this section. Full proof on unrooted device HQ64A9065A: patched X **12.2.0-release.0** (Piko 3.7.0 + x-shim 1.7.0, morphe-cli, our re-sign) **boots past PairIP native check (no SIGSEGV), logs in (attestation passes — `Integrity key attestation record generated successfully`, no `AttestationDenied`), loads the home feed.** The native wall is version-dependent: 12.4.1 SIGSEGVs, 12.2.0 does not. Working artifact: `build/x-12.2.0-patched.apk`. Everything below is retained as the 12.4.1-specific record.
+  - **BLOCKED by PairIP — X is not sideload-patchable on an unrooted device (v12.4.1 ONLY; NOT true for 12.2.0 — see superseding note above).** X is wrapped by Google Play **PairIP** anti-tamper: `Lcom/pairip/application/Application;` extends the real `Lcom/twitter/app/TwitterApplication;` and, in `attachBaseContext`, calls `VMRunner.setContext` + `SignatureCheck.verifyIntegrity` + `LicenseClient.checkLicense`. ~22 real app methods (mostly `BroadcastReceiver.onReceive` across `com/twitter`, `com/x`, `androidx`, `com/google`, `braze`) are **virtualized** — body replaced by `Lcom/pairip/VMRunner;->invoke(blobName, args)`, real bytecode encrypted in `assets/` blobs (random 16-char names) and interpreted by native `libpairipcore.so`. `StartupLauncher.launch()` runs the startup blob.
+    - **Rigorous empirical findings (all with a ≥20 s observation window — pairip's crash is *delayed* ~5–10 s after StartActivity, so short checks give false positives):**
+      1. **Any our-key re-sign SIGSEGVs.** Even resign-only (no code patches) native-crashes in `libpairipcore.so`, fault addr `0x6ffabf365d000337`. So pairip's native VM enforces the Play signing identity; every sideloaded (re-signed) build dies. Blur/ad patches are irrelevant to *this* crash.
+      2. **The tamper crash is defeatable**, but not the app. Neutering the VM entry (`VMRunner.invoke`→null, or surgically `StartupLauncher.launch`→`return-void`, plus `verifyIntegrity`/`checkLicense`→`return-void`) removes the native SIGSEGV — the app then boots further and dies with a **Java** `NullPointerException` in `FirebaseInitProvider.onCreate` (`gms .../u.a` → `Resources.getIdentifier(name=null)`). The startup blob does **essential init entangled with the integrity check** in one encrypted native blob; skipping it starves downstream init, running it crashes on signature. Can't split them statically.
+    - **`pairip/BypassPairipPatch.kt`** mirrors kareemlukitomo/morphe-patches' `DisableTwitterPairIpPatch` (the one known static attempt): `Application.attachBaseContext`→`invoke-super`+`return-void` (skips setContext/verifyIntegrity/checkLicense), `SignatureCheck.verifyIntegrity`→`return-void`, `StartupLauncher.launch`→`return-void`. **It removes the native SIGSEGV** but our apktool-repacked Play bundle then dies with the same Firebase NPE. Morphe targets **APKMirror APKM** bundles — the source/repack tooling differs; the startup blob's essential init is the sticking point on a Play-pulled bundle.
+    - **Community consensus (crimera/piko#977, Jul 2026):** no non-root `libpairipcore` bypass exists. pairipfix and ReVanced use the same "return pass" idea; only in-memory (LSPosed) works because it never re-signs/rebuilds the dex. **Worse — a login wall independent of pairip:** current X sends a Play Integrity token at login, so a re-signed APK gets `LoginError.AttestationDenied` + OAuth `UNREGISTERED_ON_API_CONSOLE` (cert-fingerprint mismatch). Even the old pre-PairIP escape (≤11.81) now can't log in. PairIP history on X: added 10.85, removed, re-added 11.82, present on 12.4.1.
+    - **Conclusion (12.4.1-specific):** X 12.4.1 re-signed crashes in pairip's native VM (SIGSEGV) on unrooted, and even the tamper-neutered build dies at FirebaseInit — so **12.4.1 is not sideload-patchable unrooted** by static re-sign. This does NOT generalize: **12.2.0 works unrooted** (superseding note at the top of this section + RESULT/SUCCESS bullets below). For 12.4.1 specifically the only route remains root + LSPosed. Our three hand-written `patches/twitter/*` smali patches were RE artifacts against 12.4.1; the actually-shipping path is Piko+x-shim on 12.2.0, not those. Restore stock X by reinstalling the **original Play-signed** apks from `apps/twitter/apks/` (`adb install-multiple`) — valid signature, launches fine.
+    - Upstream references: ReVanced's own Twitter "Hide ads" (`twitter/misc/hook/HideAdsHookPatch`, extension-based JSON hook) targets **10.60/10.86** (pre-PairIP) and won't `compatibleWith` 12.4.1. ReVanced's shared pairip *licensecheck* patch: `patches/shared/misc/pairip/license/DisableLicenseCheckPatch.kt` (our `patches/pairip/` replicates it, universally).
+    - **`inotia00/x-shim` evaluated (2026-07-07) — NOT a non-root escape, doesn't change our conclusion.** It's a *Piko* compatibility shim, not a PairIP defeat. Zero references to `vmrunner/signature/integrity/attest/licensecheck/corepatch/pairipcore` anywhere in its source — it never touches the native VM, the resign SIGSEGV, or Play attestation. What it does: PairIP virtualizes ~22 `BroadcastReceiver.onReceive` bodies (GoogleAds, Braze push/dispatch, ExoPlayer, Timeline, Tracker, Telephony, Locale, Media3, Worker, AppCompat…); the shim *reconstructs those virtualized method shapes* from a ProGuard-mock JSON name-map (`inotia00/proguard-patches` + `piko-proguard-mock`) so Piko's hooks resolve, and re-injects native libs Piko needs (`libjingle_peerconnection`, `libjuicebox_sdk_jni`). It restores hook targets; it does not crack the VM. Still requires root — README: "Root permission may be required (LSPosed CorePatch)" (CorePatch = the signature-verification defeat = our native/attestation wall), and getting the mock JSON also needs root. Wrong pipeline for us anyway: `ApkFileType.APKM` (ApkMirror bundles) via **Morphe Manager** on-device patcher and its own `app.morphe.patcher` fork, not our `revanced-cli` + Play-pulled bundle. And dead on current X: v1.7.0 (2026-07-03) "Temporarily disable all patches in 12.5.0-release.0+" (`is_12_05_or_greater → false`), prior 15 releases a stream of "Exception thrown in 12.x" firefighting; README: "may not work in its current state." Bottom line: x-shim is the **root-path Piko tooling**, confirms "root + LSPosed only" — do not re-investigate as a non-root route.
+      - **Morphe toolchain assembled + empirically probed (2026-07-07), scratchpad `morphe/`.** Pieces: `morphe-cli-1.9.1-all.jar` (GitHub MorpheApp/morphe-cli, 109MB), Piko `patches-3.7.0.mpp` (GitHub crimera/piko, 122 patches), x-shim `patches-1.7.0.mpp` (GitLab release asset, 3 patches: "Abstract shim layer" / "…for native library" / "…for method", all default-on), mock data GitLab `inotia00/piko-proguard-mock` (`mock/312020000.json`=12.2.0 … `312041000.json`=12.4.1, auto-fetched by the shim patch — **no root needed to fetch when the version's JSON exists**). `.mpp` = Morphe patch bundle (a jar). morphe-cli **accepts our Play-pulled `.apks`** (merges splits like an APKM) — the ApkMirror-vs-Play distinction is not a hard input requirement. `patch` has `--mount` (root install, keeps original sig) and `--unsigned`.
+      - **Hard blockers found (both stable Piko 3.7.0 AND dev 3.8.0-dev.3):** (1) **Piko X version ceiling = 12.2.0-release.0** (`list-versions -f com.twitter.android` → 11.81/11.99-ripped/12.0.0/12.2.0 only; 70 patches). Our repo's **12.4.1** is *past* Piko — a full run skips all 122 twitter patches as incompatible, leaving only x-shim's 3 no-op shims. To get real features (Remove Ads, Show sensitive media, etc.) you must target **X 12.2.0-release.0** from ApkMirror. (2) **No PairIP/native-sig bypass exists in either bundle** — grep of piko+x-shim `.mpp` classes and patch names for `pairip|signat|integrit|spoof|attest|mount|license|tamper|verif` = nothing (lone "SignatureCheckExtensionFingerprint" is Instagram-links, unrelated). Piko twitter patches are pure UI/feature toggles. So a re-signed unrooted build still hits the same native SIGSEGV; Morphe's only answer is `--mount` = **root**. Confirms: **the Reddit "it works" reports are rooted-mount** (original signature preserved), not a non-root escape.
+      - **RESULT (2026-07-07, unrooted device HQ64A9065A) — the native PairIP wall is VERSION-DEPENDENT; 12.2.0 BOOTS re-signed.** Built re-signed X **12.2.0-release.0** (ApkMirror APKM at `apps/twitter/apks/x-12.2.0.apkm`) with piko 3.7.0 + x-shim 1.7.0 via morphe-cli (70 piko + 3 x-shim applied, mock JSON `312020000` auto-fetched no-root, output single merged universal APK `build/x-12.2.0-patched.apk`, 230MB). Uninstalled stock 12.4.1, `adb install` succeeded, launched. **App runs — process stays alive past the ~5–10s delayed-crash window, NO `libpairipcore` SIGSEGV, NO tombstone, FirebaseInit SUCCEEDS** (on 12.4.1 this same point NPE'd in FirebaseInitProvider). Reaches the X login screen ("See what's happening" — Google / email / Continue with Phone / Login with username; top activity `com.twitter.x.lite.XLiteActivity`). Screenshot `build/x122-screen2.png`. **So the earlier "X unusable when patched on unrooted at *every* version" conclusion was wrong — it held for 12.4.1 (which SIGSEGVs) but 12.2.0 clears the native check via this Morphe+x-shim+resign path.** Why the difference: 12.4.1's native integrity is stricter than 12.2.0's, and/or x-shim's shim-layer only supports up to 12.4.1 with the piko hooks resolving at 12.2.0. Build cmd: `java -jar morphe-cli.jar patch --patches=piko-3.7.0.mpp --patches=x-shim-1.7.0.mpp -o build/x-12.2.0-patched.apkm apps/twitter/apks/x-12.2.0.apkm`.
+      - **SUCCESS — login attestation PASSES on re-signed 12.2.0 (unrooted).** User logged in with username/password; the home "For you" feed loads real tweets (screenshot `build/x122-loggedin.png`). Logcat shows `Finsky: Integrity key attestation record generated successfully` and **zero** `AttestationDenied` / `UNREGISTERED_ON_API_CONSOLE` / login errors. So the prior "server-side attestation blocks login on any re-signed build" claim was 12.4.1-era and does **not** hold at 12.2.0 — the whole flow (patch → boot → login → feed) works unrooted. Why login passes despite the changed signing cert: the 12.2.0 OAuth/login path evidently isn't gating on the Play cert-fingerprint the way 12.4.1 does (or x-shim's shim keeps the attestation surface satisfied). **Net: on this host the shipping recipe for a working ad-reduced X on an unrooted phone is `morphe-cli patch --patches=piko-3.7.0.mpp --patches=x-shim-1.7.0.mpp -o out.apk <X-12.2.0 APKM>` then `adb install` (single merged universal APK, plain install not install-multiple).** Feature-verification: **user confirmed the Piko patches (ad removal etc.) are working** on the live logged-in build. End-to-end verified: patch → boot → login → feed → features active, all on the unrooted device.
+  - **PairIP flavors differ per app.** hidratespark defeats only pairip's *licensecheck* (`com.pairip.licensecheck.LicenseClient` — a Java Play-ownership gate, no-op to success; no native-VM entanglement there). X adds *VM virtualization + native signature/integrity* on top, which the licensecheck no-op alone does not touch. meetup has no pairip at all (pure R8). A universal `LicenseClient.checkLicense`→`return-void` patch is worth having for the licensecheck-only flavor but does not unlock X.
 
 ## Upstreaming
 

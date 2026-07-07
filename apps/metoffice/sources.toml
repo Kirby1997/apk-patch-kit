@@ -1,0 +1,8 @@
+package     = "uk.gov.metoffice.weather.android"
+app_version = "3.40.0"
+engine      = "revanced"
+apk         = "apks/uk.gov.metoffice.weather.android.apks"
+
+[[bundle]]
+type = "local"
+project = "metoffice"

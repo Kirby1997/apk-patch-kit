@@ -15,5 +15,5 @@ kotlin {
 }
 
 tasks.jar {
-    archiveBaseName.set("foldersync-patches")
+    archiveBaseName.set("metoffice-patches")
 }

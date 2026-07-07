@@ -1,0 +1,9 @@
+package = "x"
+app_version = "1"
+engine = "revanced"
+apk = "a.apk"
+
+[[bundle]]
+type = "ftp"
+repo = "a/b"
+version = "1"

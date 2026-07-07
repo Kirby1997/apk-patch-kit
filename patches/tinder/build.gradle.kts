@@ -10,7 +10,7 @@ dependencies {
 kotlin {
     jvmToolchain(17)
     compilerOptions {
-        freeCompilerArgs.addAll("-Xcontext-receivers", "-Xskip-prerelease-check")
+        freeCompilerArgs.addAll("-Xcontext-parameters", "-Xskip-prerelease-check")
     }
 }
 

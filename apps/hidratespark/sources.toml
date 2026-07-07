@@ -1,0 +1,8 @@
+package     = "hidratenow.com.hidrate.hidrateandroid"
+app_version = "4.6.9"
+engine      = "revanced"
+apk         = "apks/hidratenow.com.hidrate.hidrateandroid.apks"
+
+[[bundle]]
+type = "local"
+project = "hidratespark"

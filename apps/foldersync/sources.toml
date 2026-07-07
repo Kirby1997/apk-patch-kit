@@ -1,0 +1,8 @@
+package     = "dk.tacit.android.foldersync.lite"
+app_version = "4.8.5"
+engine      = "revanced"
+apk         = "apks/dk.tacit.android.foldersync.lite.apks"
+
+[[bundle]]
+type = "local"
+project = "foldersync"

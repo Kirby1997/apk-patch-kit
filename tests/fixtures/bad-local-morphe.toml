@@ -1,0 +1,8 @@
+package = "x"
+app_version = "1"
+engine = "morphe"
+apk = "a.apk"
+
+[[bundle]]
+type = "local"
+project = "x"

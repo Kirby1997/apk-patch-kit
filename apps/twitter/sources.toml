@@ -1,0 +1,14 @@
+package     = "com.twitter.android"
+app_version = "12.2.0-release.0"
+engine      = "morphe"
+apk         = "apks/x-12.2.0.apkm"
+
+[[bundle]]
+type = "github"
+repo = "crimera/piko"
+version = "3.7.0"
+
+[[bundle]]
+type = "gitlab"
+repo = "inotia00/x-shim"
+version = "1.7.0"

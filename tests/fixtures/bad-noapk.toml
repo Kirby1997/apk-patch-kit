@@ -1,0 +1,7 @@
+package = "x"
+app_version = "1"
+engine = "revanced"
+
+[[bundle]]
+type = "local"
+project = "x"

@@ -1,0 +1,9 @@
+package = "x"
+app_version = "1"
+engine = "banana"
+apk = "a.apk"
+
+[[bundle]]
+type = "github"
+repo = "a/b"
+version = "1"

@@ -1,0 +1,8 @@
+package = "x"
+app_version = "1"
+engine = "revanced"
+apk = "apks/base.apk"
+
+[[bundle]]
+type = "local"
+project = "demoapp"

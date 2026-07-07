@@ -1,0 +1,8 @@
+package     = "com.strava"
+app_version = "460.9"
+engine      = "revanced"
+apk         = "apks/com.strava.apks"
+
+[[bundle]]
+type = "url"
+url  = "https://api.revanced.app/v5/patches.rvp"
