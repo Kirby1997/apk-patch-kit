@@ -384,6 +384,10 @@ if [ -n "$MANIFEST" ]; then
 
     if [ "$ENGINE" = morphe ]; then
         OUT_APK="build/${APP}-patched.apk"; mkdir -p build
+        # morphe's STRIP_FAST dex compile fails on a 9p mount (/mnt/c): the just-written
+        # DEX isn't visible to the verify step. Point its temp at native storage ($TMPDIR,
+        # ext4 under WSL) via MORPHE_TMP so the dex compile stays off the Windows drive.
+        export MORPHE_TMP="${MORPHE_TMP:-$(mktemp -d)}"
         mapfile -t CLI_ARGS < <(engine_morphe_args "$JSON" "$CLI_JAR" "$APK_IN" "$OUT_APK" "$BUNDLES_FILE")
         if [ "${RESOLVE_ONLY:-false}" = true ]; then
             echo "app:     $APP"; echo "engine:  morphe"; echo "cli:     $CLI_JAR"; echo "input:   $APK_IN"
