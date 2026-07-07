@@ -11,4 +11,11 @@ assert_eq "$(manifest_get "$FX/twitter.toml" '.bundle[0].repo')" "crimera/piko" 
 assert_eq "$(manifest_get "$FX/hidratespark.toml" '.bundle[0].type')" "local" "hs bundle type"
 assert_eq "$(manifest_get "$FX/twitter.toml" '.patches.exclusive')" "false" "present false preserved"
 assert_eq "$(manifest_get "$FX/twitter.toml" '.patches.nonexistent')" "" "absent field empty"
+
+assert_eq "$(manifest_validate "$FX/twitter.toml" >/dev/null 2>&1; echo $?)" "0" "twitter valid"
+assert_eq "$(manifest_validate "$FX/hidratespark.toml" >/dev/null 2>&1; echo $?)" "0" "hs valid"
+assert_nonzero manifest_validate "$FX/bad-engine.toml"
+assert_nonzero manifest_validate "$FX/bad-local-morphe.toml"
+assert_nonzero manifest_validate "$FX/bad-nobundle.toml"
+
 t_summary
