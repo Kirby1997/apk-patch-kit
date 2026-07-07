@@ -20,5 +20,6 @@ manifest_validate() { # <toml-file> -> 0 valid; nonzero + stderr on error
     echo "manifest: bundle.type must be github|gitlab|local|url" >&2; return 1; fi
   if printf '%s' "$json" | jq -e '.bundle[] | select(.type=="local")' >/dev/null && [ "$engine" != revanced ]; then
     echo "manifest: type=local requires engine=revanced" >&2; return 1; fi
+  [ -n "$(printf '%s' "$json" | jq -r '.apk // empty')" ] || { echo "manifest: missing apk field" >&2; return 1; }
   return 0
 }

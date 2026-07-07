@@ -62,13 +62,14 @@ fetch_url() { # url sha256|-  -> prints cached path; downloads if absent
 ENGINES_TOML="${ENGINES_TOML:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/engines.toml}"
 BIN_DIR="${BIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin}"
 
-engine_cli_key() { printf '%s-cli.jar' "$1"; }   # morphe -> morphe-cli.jar
+engine_cli_key() { printf '%s-cli-%s.jar' "$1" "$2"; }   # (morphe,1.9.1) -> morphe-cli-1.9.1.jar
 
 engine_cli_path() { # engine (morphe|revanced) -> path to jar in bin/, fetching if absent
   local engine="$1" ver dst
   ver="$(python3 -c 'import tomllib,sys;print(tomllib.load(open(sys.argv[1],"rb"))[sys.argv[2]]["version"])' "$ENGINES_TOML" "$engine")" \
     || { echo "engine: no version pinned for $engine in $ENGINES_TOML" >&2; return 1; }
-  mkdir -p "$BIN_DIR"; dst="$BIN_DIR/$(engine_cli_key "$engine")"
+  # version-keyed filename: bumping engines.toml forces a refetch instead of reusing a stale jar
+  mkdir -p "$BIN_DIR"; dst="$BIN_DIR/$(engine_cli_key "$engine" "$ver")"
   if [ ! -f "$dst" ]; then
     local src
     case "$engine" in
