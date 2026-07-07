@@ -42,3 +42,7 @@ Thumbs.db
 
 # Personal scratchpad
 TODO.md
+
+# Engine CLI jars / fetch cache (see engines.toml)
+bin/
+.cache/

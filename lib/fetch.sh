@@ -34,3 +34,25 @@ fetch_asset() {
   fi
   printf '%s' "$path"
 }
+
+ENGINES_TOML="${ENGINES_TOML:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/engines.toml}"
+BIN_DIR="${BIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin}"
+
+engine_cli_key() { printf '%s-cli.jar' "$1"; }   # morphe -> morphe-cli.jar
+
+engine_cli_path() { # engine (morphe|revanced) -> path to jar in bin/, fetching if absent
+  local engine="$1" ver dst
+  ver="$(python3 -c 'import tomllib,sys;print(tomllib.load(open(sys.argv[1],"rb"))[sys.argv[2]]["version"])' "$ENGINES_TOML" "$engine")" \
+    || { echo "engine: no version pinned for $engine in $ENGINES_TOML" >&2; return 1; }
+  mkdir -p "$BIN_DIR"; dst="$BIN_DIR/$(engine_cli_key "$engine")"
+  if [ ! -f "$dst" ]; then
+    local src
+    case "$engine" in
+      morphe)   src="$(fetch_asset github MorpheApp/morphe-cli "v$ver" "morphe-cli-$ver-all.jar" -)" ;;
+      revanced) src="$(fetch_asset github ReVanced/revanced-cli "v$ver" "revanced-cli-$ver-all.jar" -)" ;;
+      *) echo "engine: unknown engine $engine" >&2; return 1 ;;
+    esac || return 1
+    cp "$src" "$dst"
+  fi
+  printf '%s' "$dst"
+}
