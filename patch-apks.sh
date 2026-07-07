@@ -35,6 +35,11 @@ log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[-]${NC} $*" >&2; exit 1; }
 
+# ── Manifest-driven patch libs (lib/{manifest,fetch,resolve,engine-*}.sh) ──
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+. "$_LIB/manifest.sh"; . "$_LIB/fetch.sh"; . "$_LIB/resolve.sh"
+. "$_LIB/engine-morphe.sh"; . "$_LIB/engine-revanced.sh"
+
 # ── Defaults ────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP=""
@@ -50,6 +55,7 @@ NO_FILTER=false
 INSTALL=false
 REINSTALL=false
 ADB_OVERRIDE=""
+RESOLVE_ONLY=false
 
 # ── Parse CLI arguments ─────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -67,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --install)           INSTALL=true; shift ;;
         --reinstall)         INSTALL=true; REINSTALL=true; shift ;;
         --adb)               ADB_OVERRIDE="$2"; shift 2 ;;
+        --resolve-only)      RESOLVE_ONLY=true; shift ;;
         --help|-h)
             echo "Usage: ./patch-apks.sh [OPTIONS]"
             echo ""
@@ -92,6 +99,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --include-universal  Also show 'universal' patches (compatible with any app) in the selector."
             echo "                       Off by default to keep the selector small."
             echo "  --no-filter          Disable package filtering entirely — show every patch in the bundle."
+            echo ""
+            echo "Manifest-driven apps (apps/<app>/sources.toml present):"
+            echo "  --resolve-only       Print the resolved engine/CLI/bundles/command and exit without patching."
             echo ""
             echo "  -h, --help           Show this help"
             exit 0
@@ -347,6 +357,45 @@ echo "  ╔═══════════════════════
 echo "  ║         ReVanced APK Patcher                 ║"
 echo "  ╚══════════════════════════════════════════════╝"
 echo -e "${NC}"
+
+# ── Manifest-driven resolution (apps/<app>/sources.toml) ───────────
+# Additive: only engages when --app is given, no --apk/--patches override
+# is present, and that app has a sources.toml. Otherwise falls through to
+# the legacy jar/apk auto-discovery below unchanged. Runs before the
+# revanced-cli lookup on purpose — manifest apps resolve their own engine
+# CLI (morphe or revanced) via engine_cli_path and must not be forced
+# through the legacy --cli picker.
+MANIFEST=""
+if [ -n "${APP:-}" ] && [ -z "${APK_FILE:-}" ] && [ -z "${PATCHES_JAR:-}" ]; then
+    cand="apps/$APP/sources.toml"
+    [ -f "$cand" ] && MANIFEST="$cand"
+fi
+
+if [ -n "$MANIFEST" ]; then
+    manifest_validate "$MANIFEST" || exit 1
+    JSON="$(manifest_to_json "$MANIFEST")"
+    ENGINE="$(printf '%s' "$JSON" | jq -r '.engine')"
+    APKREL="$(printf '%s' "$JSON" | jq -r '.apk')"
+    APP_DIR="apps/$APP"; APK_IN="$APP_DIR/$APKREL"
+    [ -f "$APK_IN" ] || err "manifest apk not found: $APK_IN"
+    CLI_JAR="$(engine_cli_path "$ENGINE")" || exit 1
+    BUNDLES_FILE="$(mktemp)"
+    resolve_bundles "$JSON" "$APP_DIR" "$BUNDLES_FILE" || exit 1
+    OUT_APK="build/${APP}-patched.apk"; mkdir -p build
+    mapfile -t CLI_ARGS < <(engine_"${ENGINE}"_args "$JSON" "$CLI_JAR" "$APK_IN" "$OUT_APK" "$BUNDLES_FILE")
+    if [ "${RESOLVE_ONLY:-false}" = true ]; then
+        echo "app:     $APP"; echo "engine:  $ENGINE"; echo "cli:     $CLI_JAR"; echo "input:   $APK_IN"
+        echo "bundles:"; sed 's/^/  /' "$BUNDLES_FILE"
+        echo "command: java ${CLI_ARGS[*]}"
+        rm -f "$BUNDLES_FILE"; exit 0
+    fi
+    java "${CLI_ARGS[@]}" || err "patching failed"
+    rm -f "$BUNDLES_FILE"
+    echo "Patched → $OUT_APK"
+    echo "Install: \"\$ADB\" install \"$(wslpath -w "$PWD/$OUT_APK" 2>/dev/null || echo "$PWD/$OUT_APK")\""
+    exit 0
+fi
+# --- legacy path continues below unchanged ---
 
 # ── Find revanced-cli (skipped in --sign-only) ─────────────────────
 if ! $SIGN_ONLY; then
