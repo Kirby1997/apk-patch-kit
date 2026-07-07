@@ -24,11 +24,11 @@ fetch_asset() {
       *) echo "fetch: unknown host $host" >&2; return 1 ;;
     esac
     [ -n "$url" ] && [ "$url" != null ] || { echo "fetch: asset not found: $host $repo $ver $asset" >&2; return 1; }
-    curl -sL -o "$path" "$url" || { rm -f "$path"; echo "fetch: download failed: $url" >&2; return 1; }
+    curl -fsL -o "$path" "$url" || { rm -f "$path"; echo "fetch: download failed: $url" >&2; return 1; }
   fi
   if [ "$sha" != "-" ]; then
     local got; got="$(sha256sum "$path" | cut -d' ' -f1)"
-    [ "$got" = "$sha" ] || { echo "fetch: sha256 mismatch for $key (got $got want $sha)" >&2; return 1; }
+    [ "$got" = "$sha" ] || { rm -f "$path"; echo "fetch: sha256 mismatch for $key (got $got want $sha)" >&2; return 1; }
   else
     echo "fetch: $key sha256=$(sha256sum "$path" | cut -d' ' -f1) (pin this in sources.toml)" >&2
   fi
