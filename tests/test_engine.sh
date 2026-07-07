@@ -30,4 +30,13 @@ assert_contains "$SEL" "-d|Custom font" "disable pair"
 assert_contains "$SEL" "--exclusive" "exclusive flag"
 rm -f "$BF3"
 
+# MORPHE_TMP relocates morphe's temp off a 9p mount (emits -t only when set)
+BF4="$(mktemp)"; printf '/c/b.mpp\n' > "$BF4"
+JT="$(manifest_to_json "$FX/twitter.toml")"
+NOTMP="$(engine_morphe_args "$JT" cli.jar a.apkm o.apk "$BF4" | tr '\n' '|')"
+case "$NOTMP" in *"|-t|"*) assert_eq "unset-emitted-t" "unset-no-t" "MORPHE_TMP unset → no -t" ;; *) assert_eq ok ok "MORPHE_TMP unset → no -t" ;; esac
+WITHTMP="$(MORPHE_TMP=/tmp/xyz engine_morphe_args "$JT" cli.jar a.apkm o.apk "$BF4" | tr '\n' '|')"
+assert_contains "$WITHTMP" "-t|/tmp/xyz" "MORPHE_TMP set → -t emitted"
+rm -f "$BF4"
+
 t_summary

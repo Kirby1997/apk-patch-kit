@@ -18,6 +18,11 @@ engine_morphe_args() {
   printf '%s\n' -jar "$cli" patch
   local b; while IFS= read -r b; do [ -n "$b" ] && printf -- '--patches=%s\n' "$b"; done < "$bf"
   printf '%s\n' --purge -o "$out"
+  # STRIP_FAST dex compile+verify breaks on a 9p/DrvFs mount (/mnt/c): the just-written
+  # DEX isn't visible to the immediate verify step ("DEX file does not exist"). When
+  # MORPHE_TMP is set (driver points it at native ext4, e.g. /tmp), relocate morphe's
+  # temp there so the dex compile stays off the Windows mount.
+  [ -n "${MORPHE_TMP:-}" ] && printf '%s\n' -t "$MORPHE_TMP"
   _engine_selection_lines "$json"
   printf '%s\n' "$apk"
 }
