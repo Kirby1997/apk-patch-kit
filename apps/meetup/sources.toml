@@ -1,8 +1,30 @@
 package     = "com.meetup"
 app_version = "2026.04.10.2881"
-engine      = "revanced"
+engine      = "morphe"
 apk         = "apks/com.meetup.apks"
 
+# Our patches: paywall/attendees/cookie-banner/maps/unblur (incl. the new
+# unprompted-paywall suppression). Published bundle, resolved by release tag.
 [[bundle]]
-type = "local"
-project = "meetup"
+type = "github"
+repo = "Kirby1997/morphe-patches"
+version = "1.0.2"
+
+# Universal: restores push notifications broken by Morphe re-signing.
+[[bundle]]
+type = "github"
+repo = "rushiranpise/morphe-patches"
+version = "1.10.1"
+
+# Both bundles' default-enabled patches apply (no exclusive). The two rushiranpise
+# spoof patches below are default-OFF, so they only run because we enable them here:
+# "Fix Firebase after re-signing" needs "Provide Original app certificate" as its base.
+[patches]
+enable = ["Provide Original app certificate", "Fix Firebase after re-signing"]
+
+# base.apk is v2/v3-signed only (no v1 META-INF cert), so the cert-provider can't
+# auto-extract it — supply Meetup's original signing-cert SHA-1 (apksigner
+# --print-certs on apps/meetup/apks/base.apk) so the Firebase fix has a cert to spoof.
+[[patches.options]]
+patch = "Provide Original app certificate"
+manualCertSha1 = "69bc86f3bc678e18e69e41ffdca85915e7e23640"

@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # Build a morphe-cli `patch` argument list (one arg per line, excl. `java -jar`).
 
-# Shared: emit -e/-d/--exclusive lines from [patches]. Morphe + revanced use identical flags.
-# jq emits "-e\nNAME" per enabled patch so each token lands on its own line.
+# Shared: emit -O/-e/-d/--exclusive lines from [patches]. Morphe + revanced use identical flags.
+# Each token lands on its own line so the caller builds one argv element per line.
+# Per-patch options come from [[patches.options]] entries ({ patch = "<name>", <key> = <val>, ... }).
+# morphe binds -O options to the -e that FOLLOWS them, so each patch's -O lines are
+# emitted immediately before its own -e.
 _engine_selection_lines() { # json -> lines
   local json="$1"
   printf '%s' "$json" | jq -r '
-    ((.patches.enable  // []) | map("-e\n\(.)")) +
-    ((.patches.disable // []) | map("-d\n\(.)")) +
-    (if (.patches.exclusive // false) then ["--exclusive"] else [] end)
-    | .[]'
+    (.patches.options // []) as $opts
+    | ( [ (.patches.enable // [])[] as $n
+          | ( $opts[] | select(.patch == $n) | to_entries[] | select(.key != "patch")
+              | ("-O", "\(.key)=\(.value)") ),
+            ("-e", $n)
+        ]
+        + [ (.patches.disable // [])[] | ("-d", .) ]
+        + (if (.patches.exclusive // false) then ["--exclusive"] else [] end)
+      )[]'
 }
 
 # Args: json cli_jar apk out bundles_file

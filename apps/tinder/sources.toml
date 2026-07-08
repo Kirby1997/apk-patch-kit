@@ -1,8 +1,30 @@
 package     = "com.tinder"
 app_version = "17.15.0"
-engine      = "revanced"
+engine      = "morphe"
 apk         = "apks/com.tinder.apks"
 
+# Our patches: ad/paywall/upsell suppression (incl. swipe-stack ads + the Likes You
+# Gold upsell crash fix). Published bundle, resolved by release tag.
 [[bundle]]
-type = "local"
-project = "tinder"
+type = "github"
+repo = "Kirby1997/morphe-patches"
+version = "1.0.2"
+
+# Universal: restores push notifications broken by Morphe re-signing.
+[[bundle]]
+type = "github"
+repo = "rushiranpise/morphe-patches"
+version = "1.10.1"
+
+# Both bundles' default-enabled patches apply (no exclusive). The two rushiranpise
+# spoof patches below are default-OFF, so they only run because we enable them here:
+# "Fix Firebase after re-signing" needs "Provide Original app certificate" as its base.
+[patches]
+enable = ["Provide Original app certificate", "Fix Firebase after re-signing"]
+
+# base.apk is v2/v3-signed only (no v1 META-INF cert), so the cert-provider can't
+# auto-extract it — supply Tinder's original signing-cert SHA-1 (apksigner
+# --print-certs on apps/tinder/apks/base.apk) so the Firebase fix has a cert to spoof.
+[[patches.options]]
+patch = "Provide Original app certificate"
+manualCertSha1 = "609823baed399d9a97138d636550ebe82014cf2e"
