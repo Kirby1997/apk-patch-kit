@@ -8,7 +8,7 @@ apk         = "apks/com.tinder.apks"
 [[bundle]]
 type = "github"
 repo = "Kirby1997/morphe-patches"
-version = "1.0.2"
+version = "1.0.3"
 
 # Universal: restores push notifications broken by Morphe re-signing.
 [[bundle]]
