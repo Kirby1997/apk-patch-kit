@@ -46,3 +46,7 @@ TODO.md
 # Engine CLI jars / fetch cache (see engines.toml)
 bin/
 .cache/
+
+# Morphe patch source lives in its own repo (Kirby1997/morphe-patches);
+# clone it here for local .mpp builds but never commit it into this repo.
+/morphe-patches/

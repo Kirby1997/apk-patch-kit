@@ -53,6 +53,12 @@ apps/<app>/                     # One directory per app
 
 APK binaries, build outputs, decompiled dumps, signing artefacts, and all `*.jar` files (except `gradle-wrapper.jar`) are `.gitignore`d.
 
+### Morphe patch source lives in its own repo
+
+The `morphe`-engine patches (the `.mpp` bundle those apps consume) are **not** kept in this repo. Their source is a standalone patches repo, **[`Kirby1997/morphe-patches`](https://github.com/Kirby1997/morphe-patches)**, which builds one `patches-<ver>.mpp` and publishes it as a GitHub **release**. This repo links to it the same way it links to any external bundle — via each app's `sources.toml` (`repo = "Kirby1997/morphe-patches"` + a `version` pin that resolves the release asset). Nothing here builds that source; the pipeline only downloads the published `.mpp`.
+
+To work on those patches: clone the repo (`git clone https://github.com/Kirby1997/morphe-patches`) — you can clone it to `./morphe-patches/` here (it's `.gitignore`d so it never gets committed back in) or anywhere else. Edit → `./gradlew :patches:build` → cut a new `gh release` → bump the `version` in the relevant `apps/<app>/sources.toml`. This is the standard Morphe split: a patches repo is standalone (source + release), and consumers (this driver, `morphe-cli`, the on-device Manager) reference the bundle by URL/version, never by vendoring the source. The **ReVanced** `patches/<app>/` subprojects (the `type = "local"` jar-built ones) are different — those stay here and the driver builds them directly.
+
 ## Commands
 
 All from the repo root.
