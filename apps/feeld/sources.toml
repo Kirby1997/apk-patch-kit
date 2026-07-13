@@ -1,0 +1,27 @@
+package     = "co.feeld"
+app_version = "9.7.0"
+engine      = "morphe"
+apk         = "apks/co.feeld.apks"
+
+# Feeld tracking-SDK removal + profile-photo unblur. Published bundle, resolved
+# by release tag. Endpoint hostnames come from the JS/Hermes bundle at runtime,
+# so each SDK is neutralised at its transport/entry point (see the patch source).
+[[bundle]]
+type = "github"
+repo = "Kirby1997/morphe-patches"
+version = "1.2.0"
+asset = "patches-1.2.0.mpp"
+sha256 = "e4fac5da3a1860c028ebddfa08a9e77a6a833eec987a27509b5a00a6b706175d"
+
+# exclusive: apply ONLY the four Feeld patches. The bundle also carries universal
+# patches (MITM trust-user-CAs / OkHttp-pinning-bypass, PairIP licensecheck,
+# OneTrust) that have no compatibleWith and would otherwise auto-apply to Feeld —
+# none of which were requested here.
+[patches]
+exclusive = true
+enable = [
+    "Disable AppsFlyer tracking",
+    "Disable Braze tracking",
+    "Block tracking hosts (okhttp)",
+    "Unblur profile photos",
+]
